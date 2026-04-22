@@ -610,6 +610,64 @@ Antworte ausschließlich mit diesem JSON:
         text  = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
     return json.loads(text)
 
+def synthesize_with_literature(idea: dict, lit_papers: list[dict], deepened: dict, api_key: str) -> dict:
+    """Zweiter Claude-Call: Synthetisiert die gefundene Literatur mit der Idee zu einer
+    wissenschaftlich belastbaren Analyse mit Forschungslücke, These und Beitragsaussage."""
+    client = anthropic.Anthropic(api_key=api_key)
+
+    lit_context = ""
+    for p in lit_papers[:8]:
+        abstract = p.get("full", p.get("short", ""))[:400]
+        lit_context += f"\n- **{p['title']}** ({p.get('date','')[:4]}, {p.get('authors','')})\n  {abstract}\n"
+
+    prompt = f"""Du bist ein erfahrener Wissenschaftler und Betreuer von Abschlussarbeiten. \
+Analysiere die folgende Forschungsidee im Licht der tatsächlich gefundenen Literatur \
+und erstelle eine wissenschaftlich belastbare Grundlage für eine Abschlussarbeit oder ein Forschungsprojekt.
+
+Forschungsidee: {json.dumps(idea, ensure_ascii=False)}
+
+Theoretische Grundlage (bereits erarbeitet): {deepened.get('theoretical_foundations', '')}
+
+Gefundene Literatur:
+{lit_context}
+
+Deine Aufgabe:
+1. Lies die Abstracts kritisch und ordne sie ein
+2. Identifiziere die echte Forschungslücke die diese Literatur offen lässt
+3. Verfeinere die These auf Basis dessen was tatsächlich existiert
+4. Formuliere einen klaren wissenschaftlichen Beitrag
+
+Antworte ausschließlich mit diesem JSON:
+{{
+    "literature_map": [
+        {{
+            "title": "<Kurztitel des Papers>",
+            "relation": "stützt|widerspricht|ergänzt|liefert Methode|Hintergrund",
+            "relevance": "<1–2 Sätze: Wie genau hängt dieses Paper mit der Idee zusammen?>"
+        }}
+    ],
+    "research_gap": "<Präzise Beschreibung der Lücke in der Literatur — was fehlt, was ist ungeklärt, was wird ignoriert?>",
+    "refined_thesis": "<Die verfeinerte, literaturgestützte These in 2–3 Sätzen>",
+    "contribution_statement": "<Diese Arbeit würde X beitragen, indem sie Y und Z verbindet — konkret und akademisch formuliert>",
+    "objections": [
+        {{"objection": "<Möglicher Einwand>", "response": "<Wie man ihm begegnet>"}}
+    ],
+    "key_authors": ["<Autor 1>", "<Autor 2>", "<Autor 3>"],
+    "positioning": "<In welcher akademischen Debatte positioniert sich diese Arbeit? Welche Schulen/Strömungen sind relevant?>"
+}}"""
+
+    resp = client.messages.create(
+        model=CLAUDE_MODEL, max_tokens=4000,
+        system="Du antwortest ausschließlich mit validem JSON.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = resp.content[0].text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text  = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    return json.loads(text)
+
+
 def generate_search_queries(disciplines: tuple[str, ...], topic: str, api_key: str) -> dict[str, str]:
     """Lässt Claude optimierte Suchbegriffe pro Disziplin generieren."""
     client    = anthropic.Anthropic(api_key=api_key)
@@ -875,10 +933,12 @@ def render_idea(idea: dict, idx: int, papers: dict, api_key: str) -> None:
                     st.markdown(f"**Interdisziplinäre Spannungsfelder**\n\n{it}")
                 st.markdown('</div>', unsafe_allow_html=True)
 
-            # Weiterführende Literatur aus OpenAlex
+            # ── Schritt 2: Weiterführende Literatur aus OpenAlex ──────────────
             lit_queries = result.get("literature_queries", [])
             if lit_queries:
-                lit_cache = f"lit_{cache_key}"
+                lit_cache  = f"lit_{cache_key}"
+                synth_cache = f"litsynth_{cache_key}"
+
                 if lit_cache not in st.session_state:
                     with st.spinner("Suche weiterführende Literatur…"):
                         found: list[dict] = []
@@ -898,6 +958,87 @@ def render_idea(idea: dict, idx: int, papers: dict, api_key: str) -> None:
                         st.session_state[lit_cache] = found[:8]
 
                 lit_papers = st.session_state.get(lit_cache, [])
+
+                # ── Schritt 3: Literatursynthese mit zweitem Claude-Call ──────
+                if lit_papers and synth_cache not in st.session_state:
+                    with st.spinner("Claude synthetisiert Literatur und verfeinert die These…"):
+                        try:
+                            st.session_state[synth_cache] = synthesize_with_literature(
+                                idea, lit_papers, result, api_key
+                            )
+                        except Exception as e:
+                            st.session_state[synth_cache] = {}
+                            st.error(f"Literatursynthese fehlgeschlagen: {e}")
+
+                # ── Ausgabe: Wissenschaftliche Fundierung ─────────────────────
+                synth = st.session_state.get(synth_cache, {})
+                if synth:
+                    with st.expander("Wissenschaftliche Fundierung", expanded=True):
+                        # Verfeinerte These
+                        if rt := synth.get("refined_thesis"):
+                            st.markdown(f"""
+                            <div class="bridge-card">
+                                <div class="card-label">Verfeinerte These</div>
+                                <p style="margin:4px 0 0;color:#111827;font-size:1.0em">{rt}</p>
+                            </div>""", unsafe_allow_html=True)
+
+                        # Forschungslücke
+                        if gap := synth.get("research_gap"):
+                            st.markdown(f"""
+                            <div class="idea-card" style="margin-top:10px">
+                                <div class="card-label">Forschungslücke</div>
+                                <p style="margin:4px 0 0;color:#374151">{gap}</p>
+                            </div>""", unsafe_allow_html=True)
+
+                        # Beitragsaussage
+                        if cs := synth.get("contribution_statement"):
+                            st.markdown(f"""
+                            <div class="paper-card" style="margin-top:10px">
+                                <div class="card-label">Wissenschaftlicher Beitrag</div>
+                                <p style="margin:4px 0 0;color:#374151">{cs}</p>
+                            </div>""", unsafe_allow_html=True)
+
+                        # Positionierung
+                        if pos := synth.get("positioning"):
+                            st.markdown(f"**Akademische Positionierung**\n\n{pos}")
+
+                        # Literaturkarte
+                        if lmap := synth.get("literature_map"):
+                            st.markdown("**Literaturkarte**")
+                            rel_colors = {
+                                "stützt":          "#d1fae5",
+                                "widerspricht":    "#fee2e2",
+                                "ergänzt":         "#dbeafe",
+                                "liefert Methode": "#fef3c7",
+                                "Hintergrund":     "#f3f4f6",
+                            }
+                            for lm in lmap:
+                                rel   = lm.get("relation", "")
+                                color = rel_colors.get(rel, "#f3f4f6")
+                                st.markdown(f"""
+                                <div style="background:{color};border-radius:6px;padding:8px 12px;margin-bottom:6px">
+                                    <span style="font-weight:600;font-size:0.88em">{lm.get('title','')}</span>
+                                    <span style="font-size:0.75em;font-weight:600;text-transform:uppercase;
+                                                 margin-left:8px;color:#6b7280">{rel}</span>
+                                    <div style="font-size:0.82em;color:#374151;margin-top:4px">{lm.get('relevance','')}</div>
+                                </div>""", unsafe_allow_html=True)
+
+                        # Einwände
+                        if objs := synth.get("objections"):
+                            st.markdown("**Mögliche Einwände & Antworten**")
+                            for ob in objs:
+                                st.markdown(f"""
+                                <div style="border-left:3px solid #e5e7eb;padding:6px 12px;margin-bottom:6px">
+                                    <div style="font-size:0.85em;font-weight:600;color:#111827">↯ {ob.get('objection','')}</div>
+                                    <div style="font-size:0.82em;color:#6b7280;margin-top:3px">→ {ob.get('response','')}</div>
+                                </div>""", unsafe_allow_html=True)
+
+                        # Schlüsselautoren
+                        if authors := synth.get("key_authors"):
+                            tags = " ".join(f'<span class="tag tag-gray">{a}</span>' for a in authors)
+                            st.markdown(f"**Schlüsselautoren**<br>{tags}", unsafe_allow_html=True)
+
+                # Paper-Liste
                 if lit_papers:
                     st.markdown('<div class="section-title" style="font-size:0.9em;margin-top:16px">Weiterführende Literatur</div>', unsafe_allow_html=True)
                     for pi, lp in enumerate(lit_papers):
