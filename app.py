@@ -592,7 +592,12 @@ Antworte ausschließlich mit diesem JSON:
     "theoretical_foundations": "<relevante Theorien und Konzepte aus den beteiligten Disziplinen>",
     "open_challenges": ["<Herausforderung 1>", "<Herausforderung 2>"],
     "next_steps": ["<Erster konkreter Schritt>", "<Zweiter Schritt>", "<Dritter Schritt>"],
-    "interdisciplinary_tension": "<Wo könnten die Disziplinen in Konflikt geraten und wie löst man das>"
+    "interdisciplinary_tension": "<Wo könnten die Disziplinen in Konflikt geraten und wie löst man das>",
+    "literature_queries": [
+        {{"discipline": "<Disziplin>", "query": "<präziser englischer Suchbegriff 4–8 Wörter für OpenAlex>"}},
+        {{"discipline": "<Disziplin>", "query": "<präziser englischer Suchbegriff 4–8 Wörter für OpenAlex>"}},
+        {{"discipline": "<Disziplin>", "query": "<präziser englischer Suchbegriff 4–8 Wörter für OpenAlex>"}}
+    ]
 }}"""
     resp = client.messages.create(
         model=CLAUDE_MODEL, max_tokens=3000,
@@ -869,6 +874,34 @@ def render_idea(idea: dict, idx: int, papers: dict, api_key: str) -> None:
                 if it := result.get("interdisciplinary_tension"):
                     st.markdown(f"**Interdisziplinäre Spannungsfelder**\n\n{it}")
                 st.markdown('</div>', unsafe_allow_html=True)
+
+            # Weiterführende Literatur aus OpenAlex
+            lit_queries = result.get("literature_queries", [])
+            if lit_queries:
+                lit_cache = f"lit_{cache_key}"
+                if lit_cache not in st.session_state:
+                    with st.spinner("Suche weiterführende Literatur…"):
+                        found: list[dict] = []
+                        seen: set[str] = set()
+                        for lq in lit_queries:
+                            q = lq.get("query", "").strip()
+                            if not q:
+                                continue
+                            try:
+                                for p in _fetch_openalex(q, 1900, 2025, 4, False):
+                                    key = p["title"].lower()[:60]
+                                    if key not in seen:
+                                        seen.add(key)
+                                        found.append(p)
+                            except Exception:
+                                pass
+                        st.session_state[lit_cache] = found[:8]
+
+                lit_papers = st.session_state.get(lit_cache, [])
+                if lit_papers:
+                    st.markdown('<div class="section-title" style="font-size:0.9em;margin-top:16px">Weiterführende Literatur</div>', unsafe_allow_html=True)
+                    for pi, lp in enumerate(lit_papers):
+                        render_paper(lp, render_idx=hash(cache_key + str(pi)))
 
 
 def render_bridge(bridge: dict) -> None:
