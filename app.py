@@ -8,8 +8,15 @@ import anthropic
 import json
 import requests
 import hashlib
+import io
 from pathlib import Path
 from datetime import datetime
+
+try:
+    import pypdf
+    _PYPDF_AVAILABLE = True
+except ImportError:
+    _PYPDF_AVAILABLE = False
 
 st.set_page_config(
     page_title="SciSynth",
@@ -629,6 +636,129 @@ Antworte NUR mit diesem JSON:
     return json.loads(text)
 
 
+# ── Dokument-Upload ────────────────────────────────────────────────────────────
+def extract_text(uploaded_file) -> str:
+    """Extrahiert Text aus PDF oder TXT. Gibt max. 4000 Zeichen zurück."""
+    name = uploaded_file.name.lower()
+    if name.endswith(".txt"):
+        return uploaded_file.read().decode("utf-8", errors="ignore")[:4000]
+    if name.endswith(".pdf"):
+        if not _PYPDF_AVAILABLE:
+            return ""
+        reader = pypdf.PdfReader(io.BytesIO(uploaded_file.read()))
+        pages  = [p.extract_text() or "" for p in reader.pages[:20]]
+        return "\n".join(pages)[:4000]
+    return ""
+
+
+def synthesize_from_documents(docs: list[dict], course_title: str, api_key: str) -> dict:
+    """Lässt Claude Forschungsideen aus hochgeladenen Kursdokumenten generieren."""
+    client  = anthropic.Anthropic(api_key=api_key)
+    context = ""
+    for d in docs:
+        context += f"\n\n### Dokument: {d['name']}\n{d['text'][:2000]}…"
+
+    title_hint = f'Kurstitel: "{course_title}"\n\n' if course_title.strip() else ""
+
+    prompt = f"""{title_hint}Die folgenden Texte stammen aus Kursmaterialien. \
+Analysiere die Themenspektren und entwickle daraus originelle, transdisziplinäre Forschungsideen \
+für eine wissenschaftliche Abschlussarbeit oder ein Forschungsprojekt.
+
+Kursmaterialien:{context}
+
+Antworte ausschließlich mit diesem JSON:
+{{
+    "course_summary": "<2–3 Sätze: Was verbindet diese Materialien thematisch?>",
+    "key_themes": ["<Thema 1>", "<Thema 2>", "<Thema 3>", "<Thema 4>", "<Thema 5>"],
+    "research_ideas": [
+        {{
+            "title": "<Titel der Forschungsidee>",
+            "disciplines": ["<Disziplin 1>", "<Disziplin 2>"],
+            "description": "<2–3 Sätze Beschreibung>",
+            "novelty": "<Was ist neu oder überraschend an diesem Ansatz?>",
+            "methodology": "<Vorgeschlagene Methodik>",
+            "thesis_angle": "<Konkreter Winkel für eine Abschlussarbeit>"
+        }}
+    ],
+    "interdisciplinary_potential": "<Wo liegen die stärksten Brücken zwischen den Themen?>"
+}}"""
+
+    resp = client.messages.create(
+        model=CLAUDE_MODEL, max_tokens=3000,
+        system="Du antwortest ausschließlich mit validem JSON.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = resp.content[0].text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text  = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    return json.loads(text)
+
+
+def view_upload(api_key: str) -> None:
+    render_header()
+    st.markdown('<div class="section-title">Kurs-Analyse</div>', unsafe_allow_html=True)
+
+    if not api_key:
+        st.warning("Bitte einen Claude API Key eingeben.")
+        return
+
+    result = st.session_state.get("upload_result")
+    docs   = st.session_state.get("upload_docs", [])
+
+    if not docs and not result:
+        st.markdown("""
+        <div class="welcome">
+            <div class="welcome-icon">◎</div>
+            <h3>Kursmaterialien hochladen</h3>
+            <p>Lade PDFs oder Textdateien deiner Lehrveranstaltung hoch.<br>
+            Claude analysiert die Themenspektren und entwickelt daraus Forschungsideen
+            für deine Abschlussarbeit oder ein Seminarreferat.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    if result:
+        # Kurszusammenfassung
+        st.markdown(f"""
+        <div class="idea-card">
+            <div style="font-size:0.72em;font-weight:600;letter-spacing:0.07em;
+                        text-transform:uppercase;color:#92400e;margin-bottom:6px">Thematischer Kern</div>
+            <p style="margin:0;color:#374151">{result.get('course_summary','')}</p>
+        </div>""", unsafe_allow_html=True)
+
+        # Schlüsselthemen
+        themes = result.get("key_themes", [])
+        if themes:
+            tags = " ".join(f'<span class="tag tag-amber">{t}</span>' for t in themes)
+            st.markdown(f'<div style="margin:12px 0 20px">{tags}</div>', unsafe_allow_html=True)
+
+        # Interdisziplinäres Potential
+        if result.get("interdisciplinary_potential"):
+            st.markdown(f"""
+            <div class="bridge-card">
+                <div style="font-size:0.72em;font-weight:600;letter-spacing:0.07em;
+                            text-transform:uppercase;color:#0e7490;margin-bottom:6px">Interdisziplinäres Potential</div>
+                <p style="margin:0;color:#374151">{result['interdisciplinary_potential']}</p>
+            </div>""", unsafe_allow_html=True)
+
+        # Forschungsideen
+        st.markdown('<div class="section-title">Forschungsideen</div>', unsafe_allow_html=True)
+        for i, idea in enumerate(result.get("research_ideas", [])):
+            discs = " ".join(f'<span class="tag tag-amber">{d}</span>' for d in idea.get("disciplines", []))
+            st.markdown(f"""
+            <div class="idea-card">
+                <div style="font-size:0.72em;font-weight:600;letter-spacing:0.07em;
+                            text-transform:uppercase;color:#92400e;margin-bottom:4px">Idee {i+1}</div>
+                <div style="font-weight:700;font-size:1.05em;color:#111827;margin-bottom:6px">{idea['title']}</div>
+                <div style="margin-bottom:8px">{discs}</div>
+                <p style="margin:0 0 8px;color:#374151">{idea.get('description','')}</p>
+                <div style="font-size:0.82em;color:#6b7280"><strong>Neuheit:</strong> {idea.get('novelty','')}</div>
+                <div style="font-size:0.82em;color:#6b7280;margin-top:4px"><strong>Methodik:</strong> {idea.get('methodology','')}</div>
+                <div style="font-size:0.82em;color:#6b7280;margin-top:4px"><strong>Abschlussarbeits-Winkel:</strong> {idea.get('thesis_angle','')}</div>
+            </div>""", unsafe_allow_html=True)
+
+
 # ── Render-Funktionen ──────────────────────────────────────────────────────────
 def render_header() -> None:
     st.markdown("""
@@ -1027,7 +1157,7 @@ def main() -> None:
 
         nav = st.segmented_control(
             "nav",
-            options=["Analyse", "Favoriten", "Verlauf"],
+            options=["Analyse", "Kurs", "Favoriten", "Verlauf"],
             default=st.session_state.get("nav", "Analyse"),
             label_visibility="collapsed",
         )
@@ -1103,17 +1233,68 @@ def main() -> None:
                 </div>""",
                 unsafe_allow_html=True,
             )
+        elif nav == "Kurs":
+            _secret_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+            if _secret_key:
+                api_key = _secret_key
+            else:
+                st.markdown("### API Key")
+                api_key = st.text_input(
+                    "api_key_kurs", type="password", placeholder="sk-ant-…",
+                    label_visibility="collapsed",
+                    help="Anthropic API Key — console.anthropic.com",
+                )
+
+            st.markdown("### Kurstitel")
+            course_title = st.text_input(
+                "course_title", placeholder="z. B. Postkoloniale Rechtstheorie",
+                label_visibility="collapsed",
+            )
+
+            st.markdown("### Dokumente hochladen")
+            st.caption("PDF oder TXT · max. 20 Seiten pro Datei empfohlen")
+            uploaded_files = st.file_uploader(
+                "docs", type=["pdf", "txt"],
+                accept_multiple_files=True,
+                label_visibility="collapsed",
+            )
+
+            st.markdown("---")
+            run_upload = st.button("Ideen generieren", use_container_width=True)
+
+            if run_upload and uploaded_files:
+                docs = []
+                for f in uploaded_files:
+                    text = extract_text(f)
+                    if text.strip():
+                        docs.append({"name": f.name, "text": text})
+                if docs:
+                    st.session_state["upload_docs"]   = docs
+                    st.session_state["upload_result"] = None
+                    with st.spinner("Claude analysiert deine Kursmaterialien…"):
+                        try:
+                            st.session_state["upload_result"] = synthesize_from_documents(
+                                docs, course_title, api_key
+                            )
+                        except Exception as exc:
+                            st.error(f"Fehler: {exc}")
+                    st.rerun()
+            elif run_upload:
+                st.warning("Bitte mindestens eine Datei hochladen.")
+
+            if st.button("Zurücksetzen", use_container_width=True):
+                st.session_state.pop("upload_docs", None)
+                st.session_state.pop("upload_result", None)
+                st.rerun()
+
         else:
-            api_key = topic = ""
-            year_from = year_to = 2025
-            selected = []
-            max_papers = 4
-            peer_review_only = False
-            run = False
+            api_key = course_title = ""
 
     # View rendern
     if nav == "Analyse":
         view_analyse(api_key, topic, selected, year_from, year_to, max_papers, peer_review_only, run)
+    elif nav == "Kurs":
+        view_upload(api_key)
     elif nav == "Favoriten":
         view_favorites()
     else:
