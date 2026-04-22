@@ -1050,12 +1050,16 @@ def main() -> None:
         st.markdown("---")
 
         if nav == "Analyse":
-            st.markdown("### API Key")
-            api_key = st.text_input(
-                "api_key", type="password", placeholder="sk-ant-…",
-                label_visibility="collapsed",
-                help="Anthropic API Key — console.anthropic.com",
-            )
+            _secret_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+            if _secret_key:
+                api_key = _secret_key
+            else:
+                st.markdown("### API Key")
+                api_key = st.text_input(
+                    "api_key", type="password", placeholder="sk-ant-…",
+                    label_visibility="collapsed",
+                    help="Anthropic API Key — console.anthropic.com",
+                )
 
             st.markdown("### Forschungsthema")
             default_topic = preload["topic"] if preload else ""
