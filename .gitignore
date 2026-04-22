@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+venv/
+.venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Lokale Daten (Favoriten & Verlauf — nutzerspezifisch)
+data/
+
+# IDE / Claude
+.claude/
+.vscode/
