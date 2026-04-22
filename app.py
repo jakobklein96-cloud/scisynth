@@ -82,28 +82,30 @@ html, body, [class*="css"] { font-family: 'Inter', -apple-system, sans-serif; }
 [data-testid="stSidebar"] .stMultiSelect [data-baseweb="tag"] span { color: #0f766e !important; font-size: 0.8em !important; }
 [data-testid="stSidebar"] hr { border-color: #e5e7eb !important; margin: 1rem 0 !important; }
 
-/* Nav radio */
-[data-testid="stSidebar"] .stRadio > div {
-    display: flex !important;
-    gap: 4px !important;
-    background: #f3f4f6 !important;
-    border-radius: 8px !important;
-    padding: 3px !important;
-}
-[data-testid="stSidebar"] .stRadio label {
-    flex: 1 !important;
-    text-align: center !important;
+/* Nav buttons */
+div[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] button {
+    width: 100% !important;
+    border: 1px solid #e5e7eb !important;
+    background: transparent !important;
     border-radius: 6px !important;
-    padding: 5px 8px !important;
-    font-size: 0.82em !important;
+    padding: 4px 2px !important;
+    font-size: 0.75em !important;
     font-weight: 500 !important;
-    cursor: pointer !important;
     color: #6b7280 !important;
+    box-shadow: none !important;
+    letter-spacing: 0.01em !important;
+    min-height: 0 !important;
+    line-height: 1.4 !important;
 }
-[data-testid="stSidebar"] .stRadio label:has(input:checked) {
-    background: #ffffff !important;
+div[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] button:hover {
+    background: #f3f4f6 !important;
     color: #111827 !important;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.1) !important;
+    border-color: #d1d5db !important;
+}
+div[data-testid="stSidebar"] div[data-testid="stHorizontalBlock"] button[kind="primary"] {
+    background: #111827 !important;
+    color: #ffffff !important;
+    border-color: #111827 !important;
 }
 
 /* Sidebar button */
@@ -1039,14 +1041,20 @@ def main() -> None:
     with st.sidebar:
         st.markdown("## SciSynth")
 
-        nav = st.radio(
-            "nav", ["Analyse", "Favoriten", "Verlauf"],
-            horizontal=True, label_visibility="collapsed",
-            index=["Analyse", "Favoriten", "Verlauf"].index(
-                st.session_state.get("nav", "Analyse")
-            ),
-        )
-        st.session_state.nav = nav
+        nav = st.session_state.get("nav", "Analyse")
+        nav_col1, nav_col2, nav_col3 = st.columns(3)
+        with nav_col1:
+            if st.button("Analyse", type="primary" if nav == "Analyse" else "secondary", use_container_width=True):
+                st.session_state.nav = "Analyse"
+                st.rerun()
+        with nav_col2:
+            if st.button("Favoriten", type="primary" if nav == "Favoriten" else "secondary", use_container_width=True):
+                st.session_state.nav = "Favoriten"
+                st.rerun()
+        with nav_col3:
+            if st.button("Verlauf", type="primary" if nav == "Verlauf" else "secondary", use_container_width=True):
+                st.session_state.nav = "Verlauf"
+                st.rerun()
         st.markdown("---")
 
         if nav == "Analyse":
