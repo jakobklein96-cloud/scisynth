@@ -768,9 +768,12 @@ def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_
                 _mark_seen(cp, seen_titles, seen_dois)
 
         # ── Schiene B: Keyword-Suche (regulärer Pfad) ──
+        using_fallback = discipline not in dq_map   # True wenn kein Thema → OPENALEX_QUERIES
         raw_q    = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
         queries  = [q.strip() for q in raw_q.split("|||") if q.strip()] if raw_q else []
-        keywords = _topic_keywords(queries)  # für Post-fetch-Relevanzcheck
+        # Relevanzfilter nur bei themenspezifischen Queries — bei Fallback-Queries hat
+        # OpenAlex die Relevanz bereits durch seine eigene Suche sichergestellt
+        keywords = frozenset() if using_fallback else _topic_keywords(queries)
 
         # Domains die für Geisteswissenschaften/Sozialwissenschaften inkompatibel sind
         _BLOCKED_DOMAINS_FOR_HUMANITIES = {"Health Sciences", "Life Sciences", "Physical Sciences"}
