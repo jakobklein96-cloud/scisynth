@@ -410,18 +410,44 @@ def _reconstruct_abstract(inv: dict | None) -> str:
     return " ".join(pos[k] for k in sorted(pos))
 
 
-def _quality_score(cited: int, pub_date: str, paper_type: str) -> float:
-    """Composite-Score: 40% Zitationen + 60% Zitationsgeschwindigkeit × Peer-Review-Bonus."""
+_HUMANITIES_DISCIPLINES = frozenset({
+    "Geschichte", "Jura & Rechtswissenschaft", "Philosophie",
+    "Politikwissenschaft", "Soziologie", "Kulturwissenschaften",
+    "Postkoloniale Studien", "Genderstudies", "Literaturwissenschaft",
+    "Religionswissenschaft", "Ethnologie & Anthropologie",
+    "Medienwissenschaft", "Erziehungswissenschaft", "Kommunikationswissenschaft",
+    "Internationale Beziehungen", "Wirtschaftswissenschaften",
+    "Pädagogik", "Psychologie",
+})
+_STEM_DISCIPLINES = frozenset({
+    "Künstliche Intelligenz", "Informatik", "Physik", "Chemie",
+    "Biologie & Lebenswissenschaften", "Medizin & Gesundheit",
+    "Ingenieurwissenschaften", "Mathematik", "Neurowissenschaften",
+    "Quantencomputing", "Robotik", "Cybersecurity", "Klimawissenschaften",
+    "Astronomie & Astrophysik",
+})
+
+def _quality_score(cited: int, pub_date: str, paper_type: str, discipline: str = "") -> float:
+    """Disziplinspezifischer Composite-Score.
+    Geisteswissenschaften: Klassiker (hohe Gesamtzitationen) wichtiger.
+    STEM: Zitationsgeschwindigkeit (Aktualität) wichtiger.
+    Sozialwissenschaften: ausgewogen."""
     year = int((pub_date or "2020")[:4])
     age  = max(2025 - year, 1)
-    velocity     = cited / age
-    peer_bonus   = 1.2 if paper_type == "journal-article" else 1.0
-    return (0.4 * cited + 0.6 * velocity) * peer_bonus
+    velocity   = cited / age
+    peer_bonus = 1.2 if paper_type == "journal-article" else 1.0
+    if discipline in _HUMANITIES_DISCIPLINES:
+        cw, vw = 0.75, 0.25
+    elif discipline in _STEM_DISCIPLINES:
+        cw, vw = 0.20, 0.80
+    else:
+        cw, vw = 0.45, 0.55
+    return (cw * cited + vw * velocity) * peer_bonus
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_openalex(oa_query: str, year_from: int, year_to: int,
-                    n: int, peer_review_only: bool) -> list[dict]:
+                    n: int, peer_review_only: bool, discipline: str = "") -> list[dict]:
     try:
         filter_str = (
             f"has_abstract:true,"
@@ -458,7 +484,7 @@ def _fetch_openalex(oa_query: str, year_from: int, year_to: int,
             pub_date  = w.get("publication_date") or ""
             cited     = w.get("cited_by_count") or 0
             ptype     = w.get("type") or ""
-            score     = _quality_score(cited, pub_date, ptype)
+            score     = _quality_score(cited, pub_date, ptype, discipline)
             papers.append({
                 "title":   w.get("title") or "",
                 "short":   abstract[:420] + "…" if len(abstract) > 420 else abstract,
@@ -504,7 +530,7 @@ def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_
         # deutschsprachiger Text würde OpenAlex-Treffer verschlechtern.
         oa_q = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
         if oa_q:
-            oa_papers = _fetch_openalex(oa_q, year_from, year_to, half * 2, peer_review_only)
+            oa_papers = _fetch_openalex(oa_q, year_from, year_to, half * 2, peer_review_only, discipline)
             seen_local = {p["title"].lower()[:60] for p in papers}
             for p in oa_papers:
                 key = p["title"].lower()[:60]
@@ -597,6 +623,10 @@ Antworte ausschließlich mit diesem JSON:
         {{"discipline": "<Disziplin>", "query": "<präziser englischer Suchbegriff 4–8 Wörter für OpenAlex>"}},
         {{"discipline": "<Disziplin>", "query": "<präziser englischer Suchbegriff 4–8 Wörter für OpenAlex>"}},
         {{"discipline": "<Disziplin>", "query": "<präziser englischer Suchbegriff 4–8 Wörter für OpenAlex>"}}
+    ],
+    "counter_queries": [
+        {{"discipline": "<Disziplin>", "query": "<englischer Suchbegriff für kritische/gegenteilige Perspektiven 4–8 Wörter>"}},
+        {{"discipline": "<Disziplin>", "query": "<englischer Suchbegriff für Kritik oder Gegenargumente>"}}
     ]
 }}"""
     resp = client.messages.create(
@@ -610,7 +640,8 @@ Antworte ausschließlich mit diesem JSON:
         text  = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
     return json.loads(text)
 
-def synthesize_with_literature(idea: dict, lit_papers: list[dict], deepened: dict, api_key: str) -> dict:
+def synthesize_with_literature(idea: dict, lit_papers: list[dict], deepened: dict, api_key: str,
+                               counter_papers: list[dict] = []) -> dict:
     """Zweiter Claude-Call: Synthetisiert die gefundene Literatur mit der Idee zu einer
     wissenschaftlich belastbaren Analyse mit Forschungslücke, These und Beitragsaussage."""
     client = anthropic.Anthropic(api_key=api_key)
@@ -619,6 +650,13 @@ def synthesize_with_literature(idea: dict, lit_papers: list[dict], deepened: dic
     for p in lit_papers[:8]:
         abstract = p.get("full", p.get("short", ""))[:400]
         lit_context += f"\n- **{p['title']}** ({p.get('date','')[:4]}, {p.get('authors','')})\n  {abstract}\n"
+
+    counter_context = ""
+    if counter_papers:
+        counter_context = "\n\nKritische / gegenteilige Literatur:\n"
+        for p in counter_papers[:4]:
+            abstract = p.get("full", p.get("short", ""))[:300]
+            counter_context += f"\n- **{p['title']}** ({p.get('date','')[:4]})\n  {abstract}\n"
 
     prompt = f"""Du bist ein erfahrener Wissenschaftler und Betreuer von Abschlussarbeiten. \
 Analysiere die folgende Forschungsidee im Licht der tatsächlich gefundenen Literatur \
@@ -629,13 +667,16 @@ Forschungsidee: {json.dumps(idea, ensure_ascii=False)}
 Theoretische Grundlage (bereits erarbeitet): {deepened.get('theoretical_foundations', '')}
 
 Gefundene Literatur:
-{lit_context}
+{lit_context}{counter_context}
 
 Deine Aufgabe:
 1. Lies die Abstracts kritisch und ordne sie ein
 2. Identifiziere die echte Forschungslücke die diese Literatur offen lässt
 3. Verfeinere die These auf Basis dessen was tatsächlich existiert
 4. Formuliere einen klaren wissenschaftlichen Beitrag
+
+Wichtig: Belege jede Kernaussage in "refined_thesis" und "contribution_statement" \
+mit [Autorname, Jahr] direkt im Text. Spekulativen Inhalt kennzeichne explizit mit "(spekulativ)".
 
 Antworte ausschließlich mit diesem JSON:
 {{
@@ -647,13 +688,14 @@ Antworte ausschließlich mit diesem JSON:
         }}
     ],
     "research_gap": "<Präzise Beschreibung der Lücke in der Literatur — was fehlt, was ist ungeklärt, was wird ignoriert?>",
-    "refined_thesis": "<Die verfeinerte, literaturgestützte These in 2–3 Sätzen>",
-    "contribution_statement": "<Diese Arbeit würde X beitragen, indem sie Y und Z verbindet — konkret und akademisch formuliert>",
+    "refined_thesis": "<Die verfeinerte, literaturgestützte These in 2–3 Sätzen mit [Autorname, Jahr] Belegen>",
+    "contribution_statement": "<Diese Arbeit würde X beitragen, indem sie Y und Z verbindet — konkret und akademisch formuliert, mit [Autorname, Jahr] Belegen>",
     "objections": [
         {{"objection": "<Möglicher Einwand>", "response": "<Wie man ihm begegnet>"}}
     ],
     "key_authors": ["<Autor 1>", "<Autor 2>", "<Autor 3>"],
-    "positioning": "<In welcher akademischen Debatte positioniert sich diese Arbeit? Welche Schulen/Strömungen sind relevant?>"
+    "positioning": "<In welcher akademischen Debatte positioniert sich diese Arbeit? Welche Schulen/Strömungen sind relevant?>",
+    "counter_synthesis": "<Wie verhalten sich die Gegenargumente zur These? Was muss die Arbeit berücksichtigen?>"
 }}"""
 
     resp = client.messages.create(
@@ -668,13 +710,33 @@ Antworte ausschließlich mit diesem JSON:
     return json.loads(text)
 
 
+def verify_authors_openalex(authors: list[str]) -> dict[str, bool]:
+    """Prüft ob genannte Autoren in OpenAlex existieren. Gibt {name: verified} zurück."""
+    verified = {}
+    for name in authors[:5]:  # max 5 checks
+        try:
+            resp = requests.get(
+                "https://api.openalex.org/authors",
+                params={"search": name, "per_page": 1, "mailto": "scisynth@research.app"},
+                timeout=5,
+            )
+            results = resp.json().get("results", [])
+            verified[name] = len(results) > 0
+        except Exception:
+            verified[name] = True  # fail open — nicht als falsch markieren
+    return verified
+
+
 def generate_search_queries(disciplines: tuple[str, ...], topic: str, api_key: str) -> dict[str, str]:
     """Lässt Claude optimierte Suchbegriffe pro Disziplin generieren."""
     client    = anthropic.Anthropic(api_key=api_key)
     disc_list = "\n".join(f"- {d}" for d in disciplines)
-    prompt    = f"""Generiere für jede Disziplin einen präzisen englischen Suchbegriff (4–7 Wörter) für OpenAlex.
+    prompt    = f"""Das Forschungsthema kann in beliebiger Sprache vorliegen (häufig Deutsch).
+Übersetze es zuerst gedanklich ins Englische, dann generiere für jede Disziplin
+einen präzisen englischen Suchbegriff (4–7 Wörter) für OpenAlex, der sowohl
+das Thema als auch die disziplinspezifischen Kernkonzepte widerspiegelt.
 
-Forschungsthema: "{topic or 'Offene transdisziplinäre Exploration'}"
+Forschungsthema: "{topic or 'Open transdisciplinary exploration'}"
 
 Disziplinen:
 {disc_list}
@@ -934,10 +996,12 @@ def render_idea(idea: dict, idx: int, papers: dict, api_key: str) -> None:
                 st.markdown('</div>', unsafe_allow_html=True)
 
             # ── Schritt 2: Weiterführende Literatur aus OpenAlex ──────────────
-            lit_queries = result.get("literature_queries", [])
+            lit_queries     = result.get("literature_queries", [])
+            counter_queries = result.get("counter_queries", [])
             if lit_queries:
-                lit_cache  = f"lit_{cache_key}"
-                synth_cache = f"litsynth_{cache_key}"
+                lit_cache     = f"lit_{cache_key}"
+                counter_cache = f"counter_{cache_key}"
+                synth_cache   = f"litsynth_{cache_key}"
 
                 if lit_cache not in st.session_state:
                     with st.spinner("Suche weiterführende Literatur…"):
@@ -959,12 +1023,33 @@ def render_idea(idea: dict, idx: int, papers: dict, api_key: str) -> None:
 
                 lit_papers = st.session_state.get(lit_cache, [])
 
+                # ── Schritt 2b: Gegenliteratur aus OpenAlex ───────────────────
+                if counter_queries and counter_cache not in st.session_state:
+                    with st.spinner("Suche kritische Gegenliteratur…"):
+                        counter_found: list[dict] = []
+                        counter_seen: set[str] = set()
+                        for cq in counter_queries:
+                            q = cq.get("query", "").strip()
+                            if not q:
+                                continue
+                            try:
+                                for p in _fetch_openalex(q, 1900, 2025, 4, False):
+                                    key = p["title"].lower()[:60]
+                                    if key not in counter_seen:
+                                        counter_seen.add(key)
+                                        counter_found.append(p)
+                            except Exception:
+                                pass
+                        st.session_state[counter_cache] = counter_found[:6]
+
+                counter_papers = st.session_state.get(counter_cache, [])
+
                 # ── Schritt 3: Literatursynthese mit zweitem Claude-Call ──────
                 if lit_papers and synth_cache not in st.session_state:
                     with st.spinner("Claude synthetisiert Literatur und verfeinert die These…"):
                         try:
                             st.session_state[synth_cache] = synthesize_with_literature(
-                                idea, lit_papers, result, api_key
+                                idea, lit_papers, result, api_key, counter_papers
                             )
                         except Exception as e:
                             st.session_state[synth_cache] = {}
@@ -972,6 +1057,12 @@ def render_idea(idea: dict, idx: int, papers: dict, api_key: str) -> None:
 
                 # ── Ausgabe: Wissenschaftliche Fundierung ─────────────────────
                 synth = st.session_state.get(synth_cache, {})
+
+                # Author verification
+                auth_cache = f"authverify_{cache_key}"
+                if synth and synth.get("key_authors") and auth_cache not in st.session_state:
+                    st.session_state[auth_cache] = verify_authors_openalex(synth["key_authors"])
+
                 if synth:
                     with st.expander("Wissenschaftliche Fundierung", expanded=True):
                         # Verfeinerte These
@@ -1033,9 +1124,25 @@ def render_idea(idea: dict, idx: int, papers: dict, api_key: str) -> None:
                                     <div style="font-size:0.82em;color:#6b7280;margin-top:3px">→ {ob.get('response','')}</div>
                                 </div>""", unsafe_allow_html=True)
 
-                        # Schlüsselautoren
+                        # Gegensynthese
+                        if csynth := synth.get("counter_synthesis"):
+                            st.markdown(f"""
+                            <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;
+                                        padding:10px 14px;margin-top:10px">
+                                <div style="font-size:0.75em;font-weight:600;text-transform:uppercase;
+                                            letter-spacing:0.08em;color:#9a3412;margin-bottom:4px">Kritische Perspektive</div>
+                                <div style="font-size:0.85em;color:#374151">{csynth}</div>
+                            </div>""", unsafe_allow_html=True)
+
+                        # Schlüsselautoren (mit Verifikation)
                         if authors := synth.get("key_authors"):
-                            tags = " ".join(f'<span class="tag tag-gray">{a}</span>' for a in authors)
+                            verif = st.session_state.get(auth_cache, {})
+                            tags = ""
+                            for a in authors:
+                                is_ok = verif.get(a, True)
+                                css_class = "tag-teal" if is_ok else "tag-gray"
+                                label = a if is_ok else f"{a} (nicht verifiziert)"
+                                tags += f'<span class="tag {css_class}">{label}</span> '
                             st.markdown(f"**Schlüsselautoren**<br>{tags}", unsafe_allow_html=True)
 
                 # Paper-Liste
@@ -1043,6 +1150,12 @@ def render_idea(idea: dict, idx: int, papers: dict, api_key: str) -> None:
                     st.markdown('<div class="section-title" style="font-size:0.9em;margin-top:16px">Weiterführende Literatur</div>', unsafe_allow_html=True)
                     for pi, lp in enumerate(lit_papers):
                         render_paper(lp, render_idx=hash(cache_key + str(pi)))
+
+                # Kritische Perspektiven
+                if counter_papers:
+                    st.markdown('<div class="section-title" style="font-size:0.9em;margin-top:16px">Kritische Perspektiven</div>', unsafe_allow_html=True)
+                    for pi, cp in enumerate(counter_papers):
+                        render_paper(cp, render_idx=hash(cache_key + "counter" + str(pi)))
 
 
 def render_bridge(bridge: dict) -> None:
