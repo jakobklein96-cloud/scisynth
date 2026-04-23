@@ -615,31 +615,33 @@ def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_
                 if not _is_duplicate(p, seen_titles, seen_dois):
                     papers.append(p)
 
-        # OpenAlex — dynamische Query (bereits englisch und themenbezogen) oder statischer Fallback
-        # Rohes Nutzerthema NICHT anhängen: Claude hat es bereits in die dynamische Query integriert;
-        # deutschsprachiger Text würde OpenAlex-Treffer verschlechtern.
-        oa_q = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
-        if oa_q:
-            oa_papers = _fetch_openalex(oa_q, year_from, year_to, half * 2, peer_review_only, discipline)
-            seen_local_titles: set[str] = {p["title"].lower()[:60] for p in papers}
-            seen_local_dois:   set[str] = {(p.get("doi") or "").strip() for p in papers if p.get("doi")}
-            for p in oa_papers:
-                if not _is_duplicate(p, seen_titles, seen_dois) and not _is_duplicate(p, seen_local_titles, seen_local_dois):
+        # Queries aus dq_map extrahieren — "primary|||synonyms" aufteilen
+        raw_q   = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
+        queries = [q.strip() for q in raw_q.split("|||") if q.strip()] if raw_q else []
+
+        def _add_from_source(new_papers: list[dict]) -> None:
+            seen_local_t: set[str] = {p["title"].lower()[:60] for p in papers}
+            seen_local_d: set[str] = {(p.get("doi") or "").strip() for p in papers if p.get("doi")}
+            for p in new_papers:
+                if not _is_duplicate(p, seen_titles, seen_dois) and \
+                   not _is_duplicate(p, seen_local_t, seen_local_d):
                     papers.append(p)
-                    seen_local_titles.add(p["title"].lower()[:60])
+                    seen_local_t.add(p["title"].lower()[:60])
                     doi = (p.get("doi") or "").strip()
                     if doi:
-                        seen_local_dois.add(doi)
+                        seen_local_d.add(doi)
 
-        # Semantic Scholar (semantische Suche, bessere Monografien-Abdeckung)
-        ss_q = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
-        if ss_q:
-            ss_papers = _fetch_semantic_scholar(ss_q, year_from, year_to, half * 2, discipline)
-            seen_local_titles2: set[str] = {p["title"].lower()[:60] for p in papers}
-            seen_local_dois2:   set[str] = {(p.get("doi") or "").strip() for p in papers if p.get("doi")}
-            for p in ss_papers:
-                if not _is_duplicate(p, seen_titles, seen_dois) and not _is_duplicate(p, seen_local_titles2, seen_local_dois2):
-                    papers.append(p)
+        # OpenAlex — beide Query-Varianten ausführen
+        for q in queries:
+            _add_from_source(
+                _fetch_openalex(q, year_from, year_to, half * 2, peer_review_only, discipline)
+            )
+
+        # Semantic Scholar — beide Query-Varianten ausführen
+        for q in queries:
+            _add_from_source(
+                _fetch_semantic_scholar(q, year_from, year_to, half * 2, discipline)
+            )
 
         kept = papers[:max_per]
         if kept:
@@ -832,13 +834,23 @@ def verify_authors_openalex(authors: list[str]) -> dict[str, bool]:
 
 
 def generate_search_queries(disciplines: tuple[str, ...], topic: str, api_key: str) -> dict[str, str]:
-    """Lässt Claude optimierte Suchbegriffe pro Disziplin generieren."""
+    """Generiert zwei Suchanfragen pro Disziplin:
+    1) primary: thematisch präzise Kernbegriffe
+    2) synonyms: erweitertes Vokabular, Schulen, Strömungen, Schlüsselautoren
+    Gespeichert als 'primary|||synonyms' (Cache-kompatibel)."""
     client    = anthropic.Anthropic(api_key=api_key)
     disc_list = "\n".join(f"- {d}" for d in disciplines)
     prompt    = f"""Das Forschungsthema kann in beliebiger Sprache vorliegen (häufig Deutsch).
-Übersetze es zuerst gedanklich ins Englische, dann generiere für jede Disziplin
-einen präzisen englischen Suchbegriff (4–7 Wörter) für OpenAlex, der sowohl
-das Thema als auch die disziplinspezifischen Kernkonzepte widerspiegelt.
+Übersetze es zuerst gedanklich ins Englische.
+
+Generiere für jede Disziplin ZWEI englische Suchanfragen für akademische Datenbanken:
+1. "primary": Präzise Kernbegriffe des Themas (6–9 Wörter)
+2. "synonyms": Alternatives Vokabular — Synonyme, verwandte Konzepte, akademische
+   Schulen/Strömungen, Schlüsselautoren-Nachnamen (6–9 Wörter, terminologisch ANDERS als primary)
+
+Beispiel für Thema "hegemony international law", Disziplin "Jura & Rechtswissenschaft":
+- primary: "international law sovereignty hegemony power structures colonial"
+- synonyms: "imperialism TWAIL Anghie third world postcolonial legal theory"
 
 Forschungsthema: "{topic or 'Open transdisciplinary exploration'}"
 
@@ -846,15 +858,16 @@ Disziplinen:
 {disc_list}
 
 Regeln:
-- Englisch, akademisch, spezifisch
-- Berücksichtige das Forschungsthema wo sinnvoll
+- Nur Englisch, akademisch spezifisch
 - Keine generischen Begriffe wie "research" oder "study"
+- synonyms muss terminologisch ANDERS sein als primary
+- Für Geistes-/Sozialwiss.: Schulnamen (TWAIL, CLS, Frankfurt School usw.) und Autorennamen einbauen
 
 Antworte NUR mit diesem JSON:
-{{"<Disziplinname>": "<Suchbegriff>"}}"""
+{{"<Disziplinname>": {{"primary": "<Primärquery>", "synonyms": "<Synonymquery>"}}}}"""
 
     resp = client.messages.create(
-        model=CLAUDE_MODEL, max_tokens=800,
+        model=CLAUDE_MODEL, max_tokens=1200,
         system="Du antwortest ausschließlich mit validem JSON.",
         messages=[{"role": "user", "content": prompt}],
     )
@@ -862,7 +875,16 @@ Antworte NUR mit diesem JSON:
     if text.startswith("```"):
         lines = text.splitlines()
         text  = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-    return json.loads(text)
+    raw = json.loads(text)
+    result = {}
+    for disc, val in raw.items():
+        if isinstance(val, dict):
+            p = val.get("primary", "")
+            s = val.get("synonyms", "")
+            result[disc] = f"{p}|||{s}" if s else p
+        else:
+            result[disc] = str(val)
+    return result
 
 
 def generate_paper_abstract(paper: dict, api_key: str) -> str:
