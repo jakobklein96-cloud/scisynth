@@ -840,37 +840,38 @@ def generate_search_queries(disciplines: tuple[str, ...], topic: str, api_key: s
     client    = anthropic.Anthropic(api_key=api_key)
     disc_list = "\n".join(f"- {d}" for d in disciplines)
     prompt    = f"""Das Forschungsthema kann in beliebiger Sprache vorliegen (häufig Deutsch).
-Übersetze es zuerst gedanklich ins Englische.
+Übersetze es zuerst gedanklich ins Englische. Identifiziere die 2–3 Kernbegriffe des Themas.
 
 Kernproblem: Akademische Datenbanken nutzen Keyword-Suche. Nutzer denken in Konzepten,
-Paper verschiedener Jahrzehnte und Schulen verwenden unterschiedliche Terminologie für
-dasselbe Konzept. Lösung: Generiere 5–7 KURZE, FOKUSSIERTE Queries (je 2–4 Wörter),
-die das semantische Feld des Themas aus verschiedenen terminologischen Blickwinkeln abdecken.
-Jede Query trifft andere Paper — zusammen decken sie das volle semantische Feld ab.
+Paper verschiedener Jahrzehnte verwenden unterschiedliche Terminologie für dasselbe Konzept.
 
-Beispiel für Thema "hegemony international law", Disziplin "Jura & Rechtswissenschaft":
-[
-  "hegemony international law",
-  "imperialism sovereignty",
-  "postcolonial legal order",
-  "colonial law power",
-  "domination statehood norms",
-  "legal imperialism critique",
-  "sovereignty colonial history"
-]
-→ "imperialism sovereignty" findet Werke wie Anghie (2005)
-→ "hegemony international law" findet neuere Paper mit moderner Terminologie
-→ Verschiedene Queries = verschiedene terminologische Traditionen = vollständige Abdeckung
+Lösung: Generiere 5 ANKERGEFIXTE Queries (je 3–5 Wörter) pro Disziplin.
+ANKERREGEL: Jede Query MUSS mindestens einen Kernbegriff des Themas oder ein direktes
+Synonym davon enthalten. So bleibt jede Query thematisch verankert und driftet nicht
+in fremde Themenbereiche ab. Variation kommt nur aus den anderen Wörtern.
 
-Beispiel für Thema "climate change adaptation", Disziplin "Politikwissenschaft":
+Beispiel für Thema "hegemony international law":
+Kernbegriffe: hegemony, international law
+Synonyme: imperialism, domination, sovereignty, colonial
+
+Disziplin "Jura & Rechtswissenschaft":
 [
-  "climate policy adaptation",
-  "global warming governance",
-  "environmental politics resilience",
-  "carbon regulation states",
-  "climate justice equity",
-  "green transition policy"
+  "hegemony international law",          ← Anker: hegemony + international law
+  "imperialism sovereignty legal",       ← Anker: imperialism (Synonym) + sovereignty
+  "colonial law domination states",      ← Anker: colonial/domination (Synonyme)
+  "postcolonial international order",    ← Anker: international (Kermbegriff)
+  "legal hegemony critique theory"       ← Anker: hegemony + legal
 ]
+
+Disziplin "Politikwissenschaft":
+[
+  "hegemony political order",            ← Anker: hegemony
+  "international law power politics",    ← Anker: international law
+  "imperial dominance states",           ← Anker: imperial (Synonym)
+  "sovereignty political power",         ← Anker: sovereignty (Synonym)
+  "colonial international relations"     ← Anker: colonial/international
+]
+→ KEINE Query wie "global governance" oder "European integration" — kein thematischer Anker
 
 Forschungsthema: "{topic or 'Open transdisciplinary exploration'}"
 
@@ -879,10 +880,10 @@ Disziplinen:
 
 Regeln:
 - Nur Englisch, akademisch spezifisch
-- Je Query NUR 2–4 Wörter — kurze, fokussierte Queries schlagen lange in Datenbanksuchen
+- 3–5 Wörter pro Query
+- Kein Query ohne direkten Bezug zum Forschungsthema
 - Keine generischen Wörter wie "research", "study", "analysis"
-- Jede Query muss terminologisch ANDERS sein (verschiedene Vokabulartraditionen)
-- Queries sollen Paper aus verschiedenen Jahrzehnten auffinden können
+- Jede Query terminologisch ANDERS (verschiedene Vokabulartraditionen)
 
 Antworte NUR mit diesem JSON:
 {{"<Disziplinname>": ["<query1>", "<query2>", "<query3>", "<query4>", "<query5>"]}}"""
