@@ -581,6 +581,30 @@ def _fetch_semantic_scholar(ss_query: str, year_from: int, year_to: int,
         return []
 
 
+_STOPWORDS = frozenset({
+    "a", "an", "the", "in", "of", "and", "or", "for", "to", "with", "as",
+    "on", "at", "by", "from", "is", "are", "was", "be", "it", "its",
+    "this", "that", "which", "who", "how", "what", "between", "among",
+})
+
+def _topic_keywords(queries: list[str]) -> frozenset[str]:
+    """Extrahiert alle bedeutungstragenden Wörter aus den generierten Queries."""
+    words: set[str] = set()
+    for q in queries:
+        for w in q.lower().split():
+            if w not in _STOPWORDS and len(w) > 2:
+                words.add(w)
+    return frozenset(words)
+
+def _is_topically_relevant(paper: dict, keywords: frozenset[str]) -> bool:
+    """Prüft ob Titel oder Abstract mindestens ein Query-Keyword enthält.
+    Filtert thematisch völlig fremde Paper heraus (z.B. medizinische Metastudien
+    die nur wegen hoher Zitierungen auftauchen)."""
+    if not keywords:
+        return True
+    text = (paper.get("title", "") + " " + paper.get("full", "")).lower()
+    return any(kw in text for kw in keywords)
+
 def _is_duplicate(p: dict, seen_titles: set, seen_dois: set) -> bool:
     doi = (p.get("doi") or "").strip()
     if doi and doi in seen_dois:
@@ -615,14 +639,18 @@ def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_
                 if not _is_duplicate(p, seen_titles, seen_dois):
                     papers.append(p)
 
-        # Queries aus dq_map extrahieren — "primary|||synonyms" aufteilen
-        raw_q   = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
-        queries = [q.strip() for q in raw_q.split("|||") if q.strip()] if raw_q else []
+        # Queries aus dq_map extrahieren — "q1|||q2|||..." aufteilen
+        raw_q    = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
+        queries  = [q.strip() for q in raw_q.split("|||") if q.strip()] if raw_q else []
+        keywords = _topic_keywords(queries)  # für Post-fetch-Relevanzcheck
 
         def _add_from_source(new_papers: list[dict]) -> None:
             seen_local_t: set[str] = {p["title"].lower()[:60] for p in papers}
             seen_local_d: set[str] = {(p.get("doi") or "").strip() for p in papers if p.get("doi")}
             for p in new_papers:
+                # Relevanzfilter: mindestens ein Query-Keyword in Titel oder Abstract
+                if not _is_topically_relevant(p, keywords):
+                    continue
                 if not _is_duplicate(p, seen_titles, seen_dois) and \
                    not _is_duplicate(p, seen_local_t, seen_local_d):
                     papers.append(p)
@@ -631,18 +659,20 @@ def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_
                     if doi:
                         seen_local_d.add(doi)
 
-        # OpenAlex — beide Query-Varianten ausführen
+        # OpenAlex — alle Query-Varianten ausführen
         for q in queries:
             _add_from_source(
                 _fetch_openalex(q, year_from, year_to, half * 2, peer_review_only, discipline)
             )
 
-        # Semantic Scholar — beide Query-Varianten ausführen
+        # Semantic Scholar — alle Query-Varianten ausführen
         for q in queries:
             _add_from_source(
                 _fetch_semantic_scholar(q, year_from, year_to, half * 2, discipline)
             )
 
+        # Nach Qualitätsscore sortieren, dann auf max_per kürzen
+        papers.sort(key=lambda p: p.get("score", 0), reverse=True)
         kept = papers[:max_per]
         if kept:
             result[discipline] = kept
