@@ -478,7 +478,7 @@ def _fetch_openalex(oa_query: str, year_from: int, year_to: int,
                 "sort":     oa_sort,
                 "per_page": pool_size,
                 "select":   "id,title,abstract_inverted_index,authorships,"
-                            "publication_date,doi,cited_by_count,type",
+                            "publication_date,doi,cited_by_count,type,primary_topic",
                 "mailto":   "scisynth@research.app",
             },
             timeout=12,
@@ -497,6 +497,8 @@ def _fetch_openalex(oa_query: str, year_from: int, year_to: int,
             cited     = w.get("cited_by_count") or 0
             ptype     = w.get("type") or ""
             score     = _quality_score(cited, pub_date, ptype, discipline)
+            topic_obj = w.get("primary_topic") or {}
+            domain    = (topic_obj.get("domain") or {}).get("display_name", "")
             papers.append({
                 "title":   w.get("title") or "",
                 "short":   abstract[:420] + "…" if len(abstract) > 420 else abstract,
@@ -510,6 +512,7 @@ def _fetch_openalex(oa_query: str, year_from: int, year_to: int,
                 "cited":   cited,
                 "type":    ptype,
                 "score":   score,
+                "domain":  domain,
             })
         # Nach Composite-Score sortieren, Top-N zurückgeben
         papers.sort(key=lambda p: p["score"], reverse=True)
@@ -665,11 +668,19 @@ def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_
         queries  = [q.strip() for q in raw_q.split("|||") if q.strip()] if raw_q else []
         keywords = _topic_keywords(queries)  # für Post-fetch-Relevanzcheck
 
+        # Domains die für Geisteswissenschaften/Sozialwissenschaften inkompatibel sind
+        _BLOCKED_DOMAINS_FOR_HUMANITIES = {"Health Sciences", "Life Sciences", "Physical Sciences"}
+
         def _add_from_source(new_papers: list[dict]) -> None:
             seen_local_t: set[str] = {p["title"].lower()[:60] for p in papers}
             seen_local_d: set[str] = {(p.get("doi") or "").strip() for p in papers if p.get("doi")}
             for p in new_papers:
-                # Relevanzfilter: mindestens ein Query-Keyword in Titel oder Abstract
+                # Domain-Kompatibilitätscheck: Medizin/Naturwiss.-Paper nicht in Geisteswiss.
+                paper_domain = p.get("domain", "")
+                if (discipline in _HUMANITIES_DISCIPLINES
+                        and paper_domain in _BLOCKED_DOMAINS_FOR_HUMANITIES):
+                    continue
+                # Relevanzfilter: Keyword-Treffer in Titel oder Abstract
                 if not _is_topically_relevant(p, keywords):
                     continue
                 if not _is_duplicate(p, seen_titles, seen_dois) and \
@@ -934,7 +945,14 @@ Regeln:
 - 3–5 Wörter pro Query
 - Kein Query ohne direkten Bezug zum Forschungsthema
 - Keine generischen Wörter wie "research", "study", "analysis"
-- Jede Query terminologisch ANDERS (verschiedene Vokabulartraditionen)
+- Jede Query terminologisch ANDERS — decke diese Dimensionen ab:
+  1. Mainstream-Terminologie (etablierte Disziplinbegriffe)
+  2. Kritische/heterodoxe Terminologie (z.B. "imperialism" statt "influence", "colonial" statt "peripheral")
+  3. Historische Begriffe (wie Klassiker das Konzept nannten)
+  4. Zeitgenössische Reformulierungen
+- WICHTIG: Wenn das Thema Macht, Recht oder globale Ordnung betrifft, MUSS mindestens
+  eine Query kritische Begriffe wie "imperialism", "colonial", "hegemonic" oder "domination"
+  enthalten — diese Texte erscheinen sonst nicht in Ranking-basierten Suchen
 
 Antworte NUR mit diesem JSON:
 {{"<Disziplinname>": ["<query1>", "<query2>", "<query3>", "<query4>", "<query5>"]}}"""
