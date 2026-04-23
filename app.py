@@ -586,86 +586,90 @@ def _fetch_semantic_scholar(ss_query: str, year_from: int, year_to: int,
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_openalex_canonical(canonical_query: str, discipline: str = "") -> dict | None:
-    """Sucht ein spezifisches Schlüsselwerk via Autor-Nachname + Titelkeywords.
-    Format: 'Nachname titelwort1 titelwort2 ...'
-    Nutzt OpenAlex-Filter statt Volltext-Suche — sehr präzise, kein falscher Treffer möglich."""
+    """Sucht ein spezifisches Schlüsselwerk: 'Nachname titelwort1 titelwort2 ...'
+    Strategie: Titelkeywords per relevance_score suchen, dann Autor-Nachname in
+    den Ergebnissen verifizieren. Robuster als Filter-API (keine Syntax-Abhängigkeit)."""
     try:
         parts = canonical_query.strip().split()
         if len(parts) < 2:
             return None
-        author_lastname = parts[0]
+        author_lastname = parts[0].lower()
         title_keywords  = " ".join(parts[1:])
 
-        def _openalex_work_from_results(results: list) -> dict | None:
-            for w in results:
-                # Autor-Verifikation: Nachname muss in mindestens einem Autor auftauchen
-                all_authors = " ".join(
-                    a.get("author", {}).get("display_name", "")
-                    for a in (w.get("authorships") or [])
-                ).lower()
-                if author_lastname.lower() not in all_authors:
-                    continue
-                abstract = _reconstruct_abstract(w.get("abstract_inverted_index"))
-                auths    = [a["author"]["display_name"]
-                            for a in (w.get("authorships") or [])[:3] if a.get("author")]
-                suffix   = " et al." if len(w.get("authorships", [])) > 3 else ""
-                doi      = (w.get("doi") or "").replace("https://doi.org/", "")
-                url      = f"https://doi.org/{doi}" if doi else w.get("id", "")
-                pub_date = w.get("publication_date") or ""
-                cited    = w.get("cited_by_count") or 0
-                ptype    = w.get("type") or ""
-                topic_obj = w.get("primary_topic") or {}
-                domain   = (topic_obj.get("domain") or {}).get("display_name", "")
-                return {
-                    "title":     w.get("title") or "",
-                    "short":     abstract[:420] + "…" if len(abstract) > 420 else abstract,
-                    "full":      abstract,
-                    "authors":   ", ".join(auths) + suffix if auths else "–",
-                    "date":      pub_date[:7],
-                    "url":       url,
-                    "doi":       doi,
-                    "cats":      ["OpenAlex"],
-                    "source":    "OpenAlex",
-                    "cited":     cited,
-                    "type":      ptype,
-                    "score":     _quality_score(cited, pub_date, ptype, discipline),
-                    "domain":    domain,
-                    "canonical": True,
-                }
-            return None
+        def _build_paper(w: dict) -> dict:
+            abstract  = _reconstruct_abstract(w.get("abstract_inverted_index"))
+            auths     = [a["author"]["display_name"]
+                         for a in (w.get("authorships") or [])[:3] if a.get("author")]
+            suffix    = " et al." if len(w.get("authorships", [])) > 3 else ""
+            doi       = (w.get("doi") or "").replace("https://doi.org/", "")
+            url       = f"https://doi.org/{doi}" if doi else w.get("id", "")
+            pub_date  = w.get("publication_date") or ""
+            cited     = w.get("cited_by_count") or 0
+            ptype     = w.get("type") or ""
+            topic_obj = w.get("primary_topic") or {}
+            domain    = (topic_obj.get("domain") or {}).get("display_name", "")
+            return {
+                "title":     w.get("title") or "",
+                "short":     abstract[:420] + "…" if len(abstract) > 420 else abstract,
+                "full":      abstract,
+                "authors":   ", ".join(auths) + suffix if auths else "–",
+                "date":      pub_date[:7],
+                "url":       url,
+                "doi":       doi,
+                "cats":      ["OpenAlex"],
+                "source":    "OpenAlex",
+                "cited":     cited,
+                "type":      ptype,
+                "score":     _quality_score(cited, pub_date, ptype, discipline),
+                "domain":    domain,
+                "canonical": True,
+            }
 
-        common_params = {
-            "sort":    "cited_by_count:desc",
-            "per_page": 5,
-            "select":  "id,title,abstract_inverted_index,authorships,"
-                       "publication_date,doi,cited_by_count,type,primary_topic",
-            "mailto":  "scisynth@research.app",
-        }
+        def _author_matches(w: dict) -> bool:
+            names = " ".join(
+                (a.get("author") or {}).get("display_name", "")
+                for a in (w.get("authorships") or [])
+            ).lower()
+            return author_lastname in names
 
-        # Versuch 1: Präziser Filter — Autor UND Titelkeywords
+        common_select = ("id,title,abstract_inverted_index,authorships,"
+                         "publication_date,doi,cited_by_count,type,primary_topic")
+
+        # Versuch 1: Titelkeywords per relevance, Autor-Check im Ergebnis
         resp = requests.get(
             "https://api.openalex.org/works",
-            params={**common_params,
-                    "filter": f"title.search:{title_keywords},"
-                              f"author.display_name.search:{author_lastname}"},
+            params={
+                "search":   title_keywords,
+                "sort":     "relevance_score",
+                "per_page": 10,
+                "select":   common_select,
+                "mailto":   "scisynth@research.app",
+            },
             timeout=10,
         )
         resp.raise_for_status()
-        result = _openalex_work_from_results(resp.json().get("results", []))
-        if result:
-            return result
+        for w in resp.json().get("results", []):
+            if _author_matches(w):
+                return _build_paper(w)
 
-        # Versuch 2: Fallback — nur Autor-Filter (breitere Suche)
+        # Versuch 2: Vollquery (Nachname + Titelwörter) per relevance
         resp2 = requests.get(
             "https://api.openalex.org/works",
-            params={**common_params,
-                    "filter": f"author.display_name.search:{author_lastname},"
-                              f"has_abstract:true"},
+            params={
+                "search":   canonical_query,
+                "sort":     "relevance_score",
+                "per_page": 10,
+                "select":   common_select,
+                "mailto":   "scisynth@research.app",
+            },
             timeout=10,
         )
         resp2.raise_for_status()
-        return _openalex_work_from_results(resp2.json().get("results", []))
+        for w in resp2.json().get("results", []):
+            if _author_matches(w):
+                return _build_paper(w)
 
+        return None
     except Exception:
         return None
 
