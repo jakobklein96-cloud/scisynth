@@ -646,8 +646,13 @@ def _mark_seen(p: dict, seen_titles: set, seen_dois: set) -> None:
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_to: int,
                  max_per: int, dynamic_queries: tuple[tuple[str, str], ...],
-                 peer_review_only: bool) -> dict[str, list[dict]]:
-    dq_map = dict(dynamic_queries)  # discipline → optimized query
+                 peer_review_only: bool,
+                 canonical_queries: tuple[tuple[str, str], ...] = ()) -> dict[str, list[dict]]:
+    dq_map = dict(dynamic_queries)  # discipline → optimized query string
+    # canonical_queries: tuple of (discipline, "author title_keywords") — Claude-verified works
+    cq_map: dict[str, list[str]] = {}
+    for disc, cq in canonical_queries:
+        cq_map.setdefault(disc, []).append(cq)
     result: dict[str, list[dict]] = {}
     half = max(max_per // 2, 2)
     seen_titles: set[str] = set()  # normalized title prefix
@@ -663,7 +668,17 @@ def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_
                 if not _is_duplicate(p, seen_titles, seen_dois):
                     papers.append(p)
 
-        # Queries aus dq_map extrahieren — "q1|||q2|||..." aufteilen
+        # ── Schiene A: Claude-verifizierte Schlüsselwerke (bypass keyword- & domain-filter) ──
+        for cq in cq_map.get(discipline, []):
+            # Großzügiges Jahresfenster: Klassiker sollen nicht ausgeschlossen werden
+            c_results = _fetch_openalex(cq, 1900, 2030, 3, False, discipline)
+            for cp in c_results[:1]:  # nur bestes Ergebnis pro Canonical-Query
+                if not _is_duplicate(cp, seen_titles, seen_dois):
+                    cp["canonical"] = True   # UI-Markierung als Schlüsselwerk
+                    papers.append(cp)
+                    _mark_seen(cp, seen_titles, seen_dois)
+
+        # ── Schiene B: Keyword-Suche (regulärer Pfad) ──
         raw_q    = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
         queries  = [q.strip() for q in raw_q.split("|||") if q.strip()] if raw_q else []
         keywords = _topic_keywords(queries)  # für Post-fetch-Relevanzcheck
@@ -976,6 +991,54 @@ Antworte NUR mit diesem JSON:
     return result
 
 
+def generate_canonical_refs(disciplines: tuple[str, ...], topic: str, api_key: str) -> dict[str, list[str]]:
+    """Fragt Claude nach 2 kanonischen Schlüsselwerken pro Disziplin.
+    Gibt zurück: {discipline: ["Nachname titelwort1 titelwort2 titelwort3", ...]}
+    Die Strings sind direkt als OpenAlex-Suchanfragen nutzbar (author + title keywords)."""
+    if not topic:
+        return {}
+    client    = anthropic.Anthropic(api_key=api_key)
+    disc_list = "\n".join(f"- {d}" for d in disciplines)
+    prompt    = f"""Forschungsthema: "{topic}"
+
+Für jede Disziplin: Nenne genau 2 kanonische Schlüsselwerke (Bücher oder hochrangige Artikel)
+die für dieses spezifische Thema als unverzichtbare Referenzen gelten — also Werke die in
+Literaturlisten zum Thema immer wieder auftauchen.
+
+Fokus: Nur Werke die DIREKT zum Thema "{topic}" relevant sind, keine allgemeinen Lehrbücher.
+Bevorzuge: Einflussreiche Monographien, Grundlagentexte, paradigmenwechselnde Artikel.
+
+Disziplinen:
+{disc_list}
+
+Format pro Werk: Nur Nachname des Erstautors + 3–4 spezifische Wörter aus dem Titel.
+Diese werden als Suchquery in akademische Datenbanken eingegeben — nutze daher genaue Titelwörter.
+
+Antworte NUR mit diesem JSON:
+{{"<Disziplinname>": ["<Nachname> <Titelwort1> <Titelwort2> <Titelwort3>", "<Nachname2> <Titel...>"]}}
+
+Beispiel für Thema "international law hegemony":
+{{"Jura & Rechtswissenschaft": ["Anghie imperialism sovereignty international law", "Koskenniemi gentle civilizer nations"],
+  "Geschichte": ["Anghie imperialism colonial history", "Schmitt nomos earth international law"],
+  "Postkoloniale Studien": ["Fanon wretched earth colonial", "Said orientalism colonial discourse"]}}"""
+
+    resp = client.messages.create(
+        model=CLAUDE_MODEL, max_tokens=1000,
+        system="Du antwortest ausschließlich mit validem JSON.",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = resp.content[0].text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text  = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    try:
+        raw = json.loads(text)
+        return {disc: [q for q in queries if q.strip()] for disc, queries in raw.items()
+                if isinstance(queries, list)}
+    except Exception:
+        return {}
+
+
 def generate_paper_abstract(paper: dict, api_key: str) -> str:
     """Generates a brief AI summary for a well-known paper that lacks an indexed abstract.
     Only suitable for highly-cited works Claude likely knows from training data."""
@@ -1146,12 +1209,21 @@ def render_paper(paper: dict, render_idx: int = 0) -> None:
         s_css = "background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe"
     cats  = " ".join(f'<span class="tag tag-gray">{c}</span>' for c in paper["cats"])
     fav_id = _item_id("paper", paper["title"])
+    canonical_badge = (
+        '<span style="font-size:0.67em;font-weight:700;padding:2px 8px;border-radius:5px;'
+        'white-space:nowrap;background:#fef3c7;color:#92400e;border:1px solid #fcd34d;'
+        'margin-right:6px">📌 Schlüsselwerk</span>'
+        if paper.get("canonical") else ""
+    )
     st.markdown(f"""
     <div class="paper-card">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
             <div class="paper-title">{paper['title']}</div>
-            <span style="font-size:0.67em;font-weight:600;padding:2px 8px;border-radius:5px;
-                         white-space:nowrap;letter-spacing:0.04em;{s_css}">{src}</span>
+            <div style="display:flex;align-items:center;flex-shrink:0">
+                {canonical_badge}
+                <span style="font-size:0.67em;font-weight:600;padding:2px 8px;border-radius:5px;
+                             white-space:nowrap;letter-spacing:0.04em;{s_css}">{src}</span>
+            </div>
         </div>
         <div class="paper-meta">{paper['authors']} · {paper['date']}</div>
         <div class="paper-abstract">{paper['short']}</div>
@@ -1525,9 +1597,27 @@ def view_analyse(api_key: str, topic: str, selected: list[str], year_from: int,
 
     dynamic_queries = tuple(st.session_state.get(qkey, {}).items())
 
+    # Kanonische Schlüsselwerke identifizieren (Claude-Wissen + OpenAlex-Lookup)
+    cref_key = f"cref_{'_'.join(sorted(selected))}_{topic}"
+    if cref_key not in st.session_state:
+        with st.spinner("Identifiziere Schlüsselwerke…"):
+            try:
+                st.session_state[cref_key] = generate_canonical_refs(
+                    tuple(selected), topic or "", api_key
+                )
+            except Exception:
+                st.session_state[cref_key] = {}
+
+    canonical_queries = tuple(
+        (disc, cq)
+        for disc, queries in st.session_state.get(cref_key, {}).items()
+        for cq in queries
+    )
+
     with st.spinner("Lade und bewerte Paper…"):
         papers = fetch_papers(tuple(selected), topic or "", year_from, year_to,
-                              max_papers, dynamic_queries, peer_review_only)
+                              max_papers, dynamic_queries, peer_review_only,
+                              canonical_queries)
 
     if not papers:
         st.error("Keine Paper gefunden. Andere Suchbegriffe oder Disziplinen versuchen.")
