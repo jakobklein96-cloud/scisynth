@@ -584,6 +584,92 @@ def _fetch_semantic_scholar(ss_query: str, year_from: int, year_to: int,
         return []
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_openalex_canonical(canonical_query: str, discipline: str = "") -> dict | None:
+    """Sucht ein spezifisches Schlüsselwerk via Autor-Nachname + Titelkeywords.
+    Format: 'Nachname titelwort1 titelwort2 ...'
+    Nutzt OpenAlex-Filter statt Volltext-Suche — sehr präzise, kein falscher Treffer möglich."""
+    try:
+        parts = canonical_query.strip().split()
+        if len(parts) < 2:
+            return None
+        author_lastname = parts[0]
+        title_keywords  = " ".join(parts[1:])
+
+        def _openalex_work_from_results(results: list) -> dict | None:
+            for w in results:
+                # Autor-Verifikation: Nachname muss in mindestens einem Autor auftauchen
+                all_authors = " ".join(
+                    a.get("author", {}).get("display_name", "")
+                    for a in (w.get("authorships") or [])
+                ).lower()
+                if author_lastname.lower() not in all_authors:
+                    continue
+                abstract = _reconstruct_abstract(w.get("abstract_inverted_index"))
+                auths    = [a["author"]["display_name"]
+                            for a in (w.get("authorships") or [])[:3] if a.get("author")]
+                suffix   = " et al." if len(w.get("authorships", [])) > 3 else ""
+                doi      = (w.get("doi") or "").replace("https://doi.org/", "")
+                url      = f"https://doi.org/{doi}" if doi else w.get("id", "")
+                pub_date = w.get("publication_date") or ""
+                cited    = w.get("cited_by_count") or 0
+                ptype    = w.get("type") or ""
+                topic_obj = w.get("primary_topic") or {}
+                domain   = (topic_obj.get("domain") or {}).get("display_name", "")
+                return {
+                    "title":     w.get("title") or "",
+                    "short":     abstract[:420] + "…" if len(abstract) > 420 else abstract,
+                    "full":      abstract,
+                    "authors":   ", ".join(auths) + suffix if auths else "–",
+                    "date":      pub_date[:7],
+                    "url":       url,
+                    "doi":       doi,
+                    "cats":      ["OpenAlex"],
+                    "source":    "OpenAlex",
+                    "cited":     cited,
+                    "type":      ptype,
+                    "score":     _quality_score(cited, pub_date, ptype, discipline),
+                    "domain":    domain,
+                    "canonical": True,
+                }
+            return None
+
+        common_params = {
+            "sort":    "cited_by_count:desc",
+            "per_page": 5,
+            "select":  "id,title,abstract_inverted_index,authorships,"
+                       "publication_date,doi,cited_by_count,type,primary_topic",
+            "mailto":  "scisynth@research.app",
+        }
+
+        # Versuch 1: Präziser Filter — Autor UND Titelkeywords
+        resp = requests.get(
+            "https://api.openalex.org/works",
+            params={**common_params,
+                    "filter": f"title.search:{title_keywords},"
+                              f"author.display_name.search:{author_lastname}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        result = _openalex_work_from_results(resp.json().get("results", []))
+        if result:
+            return result
+
+        # Versuch 2: Fallback — nur Autor-Filter (breitere Suche)
+        resp2 = requests.get(
+            "https://api.openalex.org/works",
+            params={**common_params,
+                    "filter": f"author.display_name.search:{author_lastname},"
+                              f"has_abstract:true"},
+            timeout=10,
+        )
+        resp2.raise_for_status()
+        return _openalex_work_from_results(resp2.json().get("results", []))
+
+    except Exception:
+        return None
+
+
 _STOPWORDS = frozenset({
     # Grammatik
     "a", "an", "the", "in", "of", "and", "or", "for", "to", "with", "as",
@@ -668,15 +754,13 @@ def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_
                 if not _is_duplicate(p, seen_titles, seen_dois):
                     papers.append(p)
 
-        # ── Schiene A: Claude-verifizierte Schlüsselwerke (bypass keyword- & domain-filter) ──
+        # ── Schiene A: Claude-verifizierte Schlüsselwerke ──
+        # Präziser Lookup via author.display_name.search + title.search (kein falscher Treffer)
         for cq in cq_map.get(discipline, []):
-            # Großzügiges Jahresfenster: Klassiker sollen nicht ausgeschlossen werden
-            c_results = _fetch_openalex(cq, 1900, 2030, 3, False, discipline)
-            for cp in c_results[:1]:  # nur bestes Ergebnis pro Canonical-Query
-                if not _is_duplicate(cp, seen_titles, seen_dois):
-                    cp["canonical"] = True   # UI-Markierung als Schlüsselwerk
-                    papers.append(cp)
-                    _mark_seen(cp, seen_titles, seen_dois)
+            cp = _fetch_openalex_canonical(cq, discipline)
+            if cp and not _is_duplicate(cp, seen_titles, seen_dois):
+                papers.append(cp)
+                _mark_seen(cp, seen_titles, seen_dois)
 
         # ── Schiene B: Keyword-Suche (regulärer Pfad) ──
         raw_q    = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
