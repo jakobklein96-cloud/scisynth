@@ -219,7 +219,7 @@ footer     { visibility: hidden; }
 """, unsafe_allow_html=True)
 
 # ── Konstanten ─────────────────────────────────────────────────────────────────
-CLAUDE_MODEL = "claude-opus-4-5"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 DATA_DIR       = Path(__file__).parent / "data"
 FAVORITES_FILE = DATA_DIR / "favorites.json"
 HISTORY_FILE   = DATA_DIR / "history.json"
