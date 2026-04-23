@@ -834,27 +834,43 @@ def verify_authors_openalex(authors: list[str]) -> dict[str, bool]:
 
 
 def generate_search_queries(disciplines: tuple[str, ...], topic: str, api_key: str) -> dict[str, str]:
-    """Generiert zwei Suchanfragen pro Disziplin:
-    1) primary: thematisch präzise Kernbegriffe
-    2) synonyms: erweitertes Vokabular, Schulen, Strömungen, Schlüsselautoren
-    Gespeichert als 'primary|||synonyms' (Cache-kompatibel)."""
+    """Generiert 5–7 kurze, fokussierte Queries pro Disziplin die das semantische Feld
+    des Themas aus verschiedenen terminologischen Blickwinkeln abdecken.
+    Gespeichert als 'q1|||q2|||...' (Cache-kompatibel)."""
     client    = anthropic.Anthropic(api_key=api_key)
     disc_list = "\n".join(f"- {d}" for d in disciplines)
     prompt    = f"""Das Forschungsthema kann in beliebiger Sprache vorliegen (häufig Deutsch).
 Übersetze es zuerst gedanklich ins Englische.
 
-Generiere für jede Disziplin ZWEI englische Suchanfragen für akademische Datenbanken:
-1. "primary": Präzise Kernbegriffe des Themas (6–9 Wörter)
-2. "synonyms": Alternatives Vokabular — Synonyme, verwandte Konzepte, akademische
-   Schulen/Strömungen, Schlüsselautoren-Nachnamen (6–9 Wörter, terminologisch ANDERS als primary)
+Kernproblem: Akademische Datenbanken nutzen Keyword-Suche. Nutzer denken in Konzepten,
+Paper verschiedener Jahrzehnte und Schulen verwenden unterschiedliche Terminologie für
+dasselbe Konzept. Lösung: Generiere 5–7 KURZE, FOKUSSIERTE Queries (je 2–4 Wörter),
+die das semantische Feld des Themas aus verschiedenen terminologischen Blickwinkeln abdecken.
+Jede Query trifft andere Paper — zusammen decken sie das volle semantische Feld ab.
 
 Beispiel für Thema "hegemony international law", Disziplin "Jura & Rechtswissenschaft":
-- primary: "international law sovereignty hegemony colonial power"
-- synonyms: "imperialism sovereignty international law"   ← kurz, titelnahe Kernwörter
+[
+  "hegemony international law",
+  "imperialism sovereignty",
+  "postcolonial legal order",
+  "colonial law power",
+  "domination statehood norms",
+  "legal imperialism critique",
+  "sovereignty colonial history"
+]
+→ "imperialism sovereignty" findet Werke wie Anghie (2005)
+→ "hegemony international law" findet neuere Paper mit moderner Terminologie
+→ Verschiedene Queries = verschiedene terminologische Traditionen = vollständige Abdeckung
 
-Beispiel für Thema "identity politics", Disziplin "Genderstudies":
-- primary: "feminist theory identity politics intersectionality"
-- synonyms: "subjectivity gender performativity Butler"
+Beispiel für Thema "climate change adaptation", Disziplin "Politikwissenschaft":
+[
+  "climate policy adaptation",
+  "global warming governance",
+  "environmental politics resilience",
+  "carbon regulation states",
+  "climate justice equity",
+  "green transition policy"
+]
 
 Forschungsthema: "{topic or 'Open transdisciplinary exploration'}"
 
@@ -863,16 +879,16 @@ Disziplinen:
 
 Regeln:
 - Nur Englisch, akademisch spezifisch
-- Keine generischen Begriffe wie "research" oder "study"
-- synonyms: NUR 3–5 Wörter, muss terminologisch ANDERS sein als primary
-- synonyms soll Begriffe enthalten, die in Buchtiteln und Aufsatztiteln vorkommen (nicht nur Schulnamen)
-- Für Geistes-/Sozialwiss.: synonyms kann einen Autorennamen enthalten wenn er zentral ist
+- Je Query NUR 2–4 Wörter — kurze, fokussierte Queries schlagen lange in Datenbanksuchen
+- Keine generischen Wörter wie "research", "study", "analysis"
+- Jede Query muss terminologisch ANDERS sein (verschiedene Vokabulartraditionen)
+- Queries sollen Paper aus verschiedenen Jahrzehnten auffinden können
 
 Antworte NUR mit diesem JSON:
-{{"<Disziplinname>": {{"primary": "<Primärquery>", "synonyms": "<Synonymquery>"}}}}"""
+{{"<Disziplinname>": ["<query1>", "<query2>", "<query3>", "<query4>", "<query5>"]}}"""
 
     resp = client.messages.create(
-        model=CLAUDE_MODEL, max_tokens=1200,
+        model=CLAUDE_MODEL, max_tokens=1500,
         system="Du antwortest ausschließlich mit validem JSON.",
         messages=[{"role": "user", "content": prompt}],
     )
@@ -883,10 +899,8 @@ Antworte NUR mit diesem JSON:
     raw = json.loads(text)
     result = {}
     for disc, val in raw.items():
-        if isinstance(val, dict):
-            p = val.get("primary", "")
-            s = val.get("synonyms", "")
-            result[disc] = f"{p}|||{s}" if s else p
+        if isinstance(val, list):
+            result[disc] = "|||".join(q.strip() for q in val if q.strip())
         else:
             result[disc] = str(val)
     return result
