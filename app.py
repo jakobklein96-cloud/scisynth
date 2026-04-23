@@ -1219,11 +1219,9 @@ def render_paper(paper: dict, render_idx: int = 0) -> None:
     <div class="paper-card">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
             <div class="paper-title">{paper['title']}</div>
-            <div style="display:flex;align-items:center;flex-shrink:0">
-                {canonical_badge}
-                <span style="font-size:0.67em;font-weight:600;padding:2px 8px;border-radius:5px;
-                             white-space:nowrap;letter-spacing:0.04em;{s_css}">{src}</span>
-            </div>
+            <span style="display:inline-flex;align-items:center;gap:5px;flex-shrink:0">
+                {canonical_badge}<span style="font-size:0.67em;font-weight:600;padding:2px 8px;border-radius:5px;white-space:nowrap;letter-spacing:0.04em;{s_css}">{src}</span>
+            </span>
         </div>
         <div class="paper-meta">{paper['authors']} · {paper['date']}</div>
         <div class="paper-abstract">{paper['short']}</div>
