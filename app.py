@@ -849,8 +849,12 @@ Generiere für jede Disziplin ZWEI englische Suchanfragen für akademische Daten
    Schulen/Strömungen, Schlüsselautoren-Nachnamen (6–9 Wörter, terminologisch ANDERS als primary)
 
 Beispiel für Thema "hegemony international law", Disziplin "Jura & Rechtswissenschaft":
-- primary: "international law sovereignty hegemony power structures colonial"
-- synonyms: "imperialism TWAIL Anghie third world postcolonial legal theory"
+- primary: "international law sovereignty hegemony colonial power"
+- synonyms: "imperialism sovereignty international law"   ← kurz, titelnahe Kernwörter
+
+Beispiel für Thema "identity politics", Disziplin "Genderstudies":
+- primary: "feminist theory identity politics intersectionality"
+- synonyms: "subjectivity gender performativity Butler"
 
 Forschungsthema: "{topic or 'Open transdisciplinary exploration'}"
 
@@ -860,8 +864,9 @@ Disziplinen:
 Regeln:
 - Nur Englisch, akademisch spezifisch
 - Keine generischen Begriffe wie "research" oder "study"
-- synonyms muss terminologisch ANDERS sein als primary
-- Für Geistes-/Sozialwiss.: Schulnamen (TWAIL, CLS, Frankfurt School usw.) und Autorennamen einbauen
+- synonyms: NUR 3–5 Wörter, muss terminologisch ANDERS sein als primary
+- synonyms soll Begriffe enthalten, die in Buchtiteln und Aufsatztiteln vorkommen (nicht nur Schulnamen)
+- Für Geistes-/Sozialwiss.: synonyms kann einen Autorennamen enthalten wenn er zentral ist
 
 Antworte NUR mit diesem JSON:
 {{"<Disziplinname>": {{"primary": "<Primärquery>", "synonyms": "<Synonymquery>"}}}}"""
