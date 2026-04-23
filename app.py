@@ -457,14 +457,25 @@ def _fetch_openalex(oa_query: str, year_from: int, year_to: int,
         if peer_review_only:
             filter_str += ",type:journal-article"
 
-        # Doppelte Menge abrufen, danach nach Score filtern
+        # Sortierung und Poolgröße disziplinabhängig:
+        # Geisteswissenschaften → Zitationen (Klassiker), STEM → Datum (Aktualität)
+        if discipline in _HUMANITIES_DISCIPLINES:
+            oa_sort   = "cited_by_count:desc"
+            pool_size = min(max(n * 4, 25), 50)
+        elif discipline in _STEM_DISCIPLINES:
+            oa_sort   = "publication_date:desc"
+            pool_size = min(n * 2, 50)
+        else:
+            oa_sort   = "cited_by_count:desc"
+            pool_size = min(max(n * 3, 20), 50)
+
         resp = requests.get(
             "https://api.openalex.org/works",
             params={
                 "search":   oa_query,
                 "filter":   filter_str,
-                "sort":     "publication_date:desc",
-                "per_page": min(n * 2, 50),
+                "sort":     oa_sort,
+                "per_page": pool_size,
                 "select":   "id,title,abstract_inverted_index,authorships,"
                             "publication_date,doi,cited_by_count,type",
                 "mailto":   "scisynth@research.app",
