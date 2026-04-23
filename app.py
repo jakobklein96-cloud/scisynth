@@ -1780,29 +1780,36 @@ def view_analyse(api_key: str, topic: str, selected: list[str], year_from: int,
     max_papers       = params["max_papers"]
     peer_review_only = params["peer_review_only"]
 
-    # Dynamische Suchbegriffe generieren (einmalig pro Analyse)
+    # Dynamische Suchbegriffe generieren (nur wenn Thema vorhanden)
+    # Ohne Thema: OPENALEX_QUERIES-Fallbacks direkt nutzen — kein schlechter AI-Query nötig
     qkey = f"dq_{'_'.join(sorted(selected))}_{topic}"
     if qkey not in st.session_state:
-        with st.spinner("Optimiere Suchbegriffe für deine Disziplinen…"):
-            try:
-                st.session_state[qkey] = generate_search_queries(
-                    tuple(selected), topic or "", api_key
-                )
-            except Exception:
-                st.session_state[qkey] = {}
+        if topic.strip():
+            with st.spinner("Optimiere Suchbegriffe für deine Disziplinen…"):
+                try:
+                    st.session_state[qkey] = generate_search_queries(
+                        tuple(selected), topic, api_key
+                    )
+                except Exception:
+                    st.session_state[qkey] = {}
+        else:
+            st.session_state[qkey] = {}   # leere Map → fetch_papers nutzt OPENALEX_QUERIES
 
     dynamic_queries = tuple(st.session_state.get(qkey, {}).items())
 
-    # Kanonische Schlüsselwerke identifizieren (Claude-Wissen + OpenAlex-Lookup)
+    # Kanonische Schlüsselwerke nur mit Thema sinnvoll
     cref_key = f"cref_{'_'.join(sorted(selected))}_{topic}"
     if cref_key not in st.session_state:
-        with st.spinner("Identifiziere Schlüsselwerke…"):
-            try:
-                st.session_state[cref_key] = generate_canonical_refs(
-                    tuple(selected), topic or "", api_key
-                )
-            except Exception:
-                st.session_state[cref_key] = {}
+        if topic.strip():
+            with st.spinner("Identifiziere Schlüsselwerke…"):
+                try:
+                    st.session_state[cref_key] = generate_canonical_refs(
+                        tuple(selected), topic, api_key
+                    )
+                except Exception:
+                    st.session_state[cref_key] = {}
+        else:
+            st.session_state[cref_key] = {}
 
     canonical_queries = tuple(
         (disc, cq)
