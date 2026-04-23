@@ -219,8 +219,8 @@ footer     { visibility: hidden; }
 """, unsafe_allow_html=True)
 
 # ── Konstanten ─────────────────────────────────────────────────────────────────
-CLAUDE_MODEL = "claude-opus-4-5"
-DATA_DIR       = Path("C:/Users/Jakob/SciSynth/data")
+CLAUDE_MODEL = "claude-sonnet-4-5"
+DATA_DIR       = Path(__file__).parent / "data"
 FAVORITES_FILE = DATA_DIR / "favorites.json"
 HISTORY_FILE   = DATA_DIR / "history.json"
 
@@ -824,7 +824,7 @@ def synthesize(papers: dict[str, list[dict]], topic: str, api_key: str) -> dict:
     for disc, ps in papers.items():
         context += f"\n\n### {disc}\n"
         for i, p in enumerate(ps[:4], 1):
-            context += f"\n{i}. **{p['title']}**\n{p['full'][:360]}…\n"
+            context += f"\n{i}. **{p['title']}**\n{p['full'][:700]}…\n"
 
     prompt = f"""Du bist ein führender transdisziplinärer Wissenschaftssynthetiker. \
 Analysiere die folgenden aktuellen Forschungsarbeiten und erkenne überraschende \
@@ -920,14 +920,14 @@ def synthesize_with_literature(idea: dict, lit_papers: list[dict], deepened: dic
 
     lit_context = ""
     for p in lit_papers[:8]:
-        abstract = p.get("full", p.get("short", ""))[:400]
+        abstract = p.get("full", p.get("short", ""))[:700]
         lit_context += f"\n- **{p['title']}** ({p.get('date','')[:4]}, {p.get('authors','')})\n  {abstract}\n"
 
     counter_context = ""
     if counter_papers:
         counter_context = "\n\nKritische / gegenteilige Literatur:\n"
         for p in counter_papers[:4]:
-            abstract = p.get("full", p.get("short", ""))[:300]
+            abstract = p.get("full", p.get("short", ""))[:500]
             counter_context += f"\n- **{p['title']}** ({p.get('date','')[:4]})\n  {abstract}\n"
 
     prompt = f"""Du bist ein erfahrener Wissenschaftler und Betreuer von Abschlussarbeiten. \
@@ -980,6 +980,76 @@ Antworte ausschließlich mit diesem JSON:
         lines = text.splitlines()
         text  = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
     return json.loads(text)
+
+
+def validate_hypothesis(refined_thesis: str, api_key: str) -> dict:
+    """Dritter Claude-Call im deepen_idea-Flow: Prüft ob die Kernhypothese bereits existiert.
+    Ablauf: These → Prior-Art-Queries → OpenAlex-Suche → Neuigkeitsbewertung.
+    Gibt {novelty, assessment, gap_confirmed, closest_existing, prior_art_papers} zurück."""
+    client = anthropic.Anthropic(api_key=api_key)
+
+    # Schritt 1: Claude generiert gezielte Prior-Art-Queries
+    q_resp = client.messages.create(
+        model=CLAUDE_MODEL, max_tokens=400,
+        system="Du antwortest ausschließlich mit validem JSON.",
+        messages=[{"role": "user", "content": f"""Wissenschaftliche These zur Neuigkeitsprüfung:
+"{refined_thesis}"
+
+Generiere 3 präzise englische Suchanfragen (4–7 Wörter), die GENAU DIESE spezifische
+Hypothese in akademischen Datenbanken finden würden, falls sie bereits publiziert wurde.
+Nicht das allgemeine Thema — nur die konkrete Aussage der These.
+
+Antworte NUR mit JSON:
+{{"queries": ["<query1>", "<query2>", "<query3>"],
+  "core_claim": "<Kernaussage der These in einem Satz>"}}"""}],
+    )
+    q_text = q_resp.content[0].text.strip()
+    if q_text.startswith("```"):
+        q_text = "\n".join(q_text.splitlines()[1:-1])
+    queries_data = json.loads(q_text)
+
+    # Schritt 2: OpenAlex-Suche für jede Prior-Art-Query
+    raw_hits: list[dict] = []
+    for q in queries_data.get("queries", [])[:3]:
+        raw_hits.extend(_fetch_openalex(q, 2000, 2030, 3, False, ""))
+    seen_t: set[str] = set()
+    prior_papers: list[dict] = []
+    for p in raw_hits:
+        key = p["title"].lower()[:55]
+        if key not in seen_t:
+            seen_t.add(key)
+            prior_papers.append(p)
+
+    # Schritt 3: Claude bewertet Neuigkeitsgrad anhand gefundener Literatur
+    papers_ctx = "\n".join(
+        f"- {p['title']} ({p.get('date','')[:4]}, {p.get('authors','')[:40]}):\n"
+        f"  {p.get('full','')[:350]}"
+        for p in prior_papers[:6]
+    ) or "Keine ähnlichen Arbeiten in OpenAlex gefunden."
+
+    n_resp = client.messages.create(
+        model=CLAUDE_MODEL, max_tokens=700,
+        system="Du antwortest ausschließlich mit validem JSON.",
+        messages=[{"role": "user", "content": f"""Bewerte den Neuigkeitsgrad dieser wissenschaftlichen These:
+
+These: "{refined_thesis}"
+Kernaussage: {queries_data.get("core_claim", "")}
+
+Aus Prior-Art-Suche gefundene Arbeiten:
+{papers_ctx}
+
+Antworte NUR mit JSON:
+{{"novelty": "hoch|mittel|niedrig",
+  "assessment": "<2–3 Sätze: Existiert diese Hypothese bereits? Was ist wirklich neu — und warum?>",
+  "gap_confirmed": true|false,
+  "closest_existing": "<Exakter Titel des ähnlichsten Papers, oder null falls keins gefunden>"}}"""}],
+    )
+    n_text = n_resp.content[0].text.strip()
+    if n_text.startswith("```"):
+        n_text = "\n".join(n_text.splitlines()[1:-1])
+    result = json.loads(n_text)
+    result["prior_art_papers"] = prior_papers[:3]
+    return result
 
 
 def verify_authors_openalex(authors: list[str]) -> dict[str, bool]:
@@ -1570,6 +1640,46 @@ def render_idea(idea: dict, idx: int, papers: dict, api_key: str) -> None:
                                 label = a if is_ok else f"{a} (nicht verifiziert)"
                                 tags += f'<span class="tag {css_class}">{label}</span> '
                             st.markdown(f"**Schlüsselautoren**<br>{tags}", unsafe_allow_html=True)
+
+                # ── Schritt 4: Hypothesen-Validierung (on demand) ────────────
+                val_cache = f"validate_{cache_key}"
+                if synth and synth.get("refined_thesis"):
+                    st.markdown("---")
+                    val_col1, val_col2 = st.columns([3, 1])
+                    with val_col1:
+                        st.markdown(
+                            "**🔬 Hypothesen-Check** · Existiert diese Kernhypothese bereits?  "
+                            "Claude sucht gezielt nach Prior Art und bewertet den Neuigkeitsgrad."
+                        )
+                    with val_col2:
+                        run_val = st.button("Prüfen", key=f"runval_{cache_key}",
+                                            use_container_width=True)
+                    if run_val and val_cache not in st.session_state:
+                        with st.spinner("Suche nach Prior Art und bewerte Neuigkeitsgrad…"):
+                            try:
+                                st.session_state[val_cache] = validate_hypothesis(
+                                    synth["refined_thesis"], api_key
+                                )
+                            except Exception as e:
+                                st.session_state[val_cache] = {"error": str(e)}
+
+                    if val := st.session_state.get(val_cache):
+                        if "error" in val:
+                            st.error(f"Hypothesen-Check fehlgeschlagen: {val['error']}")
+                        else:
+                            novelty = val.get("novelty", "mittel")
+                            n_color = {"hoch": "#d1fae5", "mittel": "#fef3c7", "niedrig": "#fee2e2"}.get(novelty, "#f3f4f6")
+                            n_label = {"hoch": "🟢 Hohes Neuigkeitspotenzial", "mittel": "🟡 Moderates Neuigkeitspotenzial", "niedrig": "🔴 Ähnliche Arbeiten bekannt"}.get(novelty, novelty)
+                            st.markdown(f"""
+                            <div style="background:{n_color};border-radius:8px;padding:12px 16px;margin:8px 0">
+                                <div style="font-weight:700;font-size:0.9em;margin-bottom:6px">{n_label}</div>
+                                <div style="font-size:0.87em;color:#374151">{val.get("assessment","")}</div>
+                                {"<div style='font-size:0.8em;color:#6b7280;margin-top:6px'>Nächste verwandte Arbeit: <em>" + val.get("closest_existing","") + "</em></div>" if val.get("closest_existing") else ""}
+                            </div>""", unsafe_allow_html=True)
+                            if prior := val.get("prior_art_papers"):
+                                with st.expander(f"Prior-Art-Treffer ({len(prior)} Paper)", expanded=False):
+                                    for pi2, pp in enumerate(prior):
+                                        render_paper(pp, render_idx=hash(val_cache + str(pi2)))
 
                 # Paper-Liste
                 if lit_papers:
