@@ -219,7 +219,7 @@ footer     { visibility: hidden; }
 """, unsafe_allow_html=True)
 
 # ── Konstanten ─────────────────────────────────────────────────────────────────
-CLAUDE_MODEL = "claude-sonnet-4-5"
+CLAUDE_MODEL = "claude-opus-4-5"
 DATA_DIR       = Path(__file__).parent / "data"
 FAVORITES_FILE = DATA_DIR / "favorites.json"
 HISTORY_FILE   = DATA_DIR / "history.json"
@@ -1641,45 +1641,44 @@ def render_idea(idea: dict, idx: int, papers: dict, api_key: str) -> None:
                                 tags += f'<span class="tag {css_class}">{label}</span> '
                             st.markdown(f"**Schlüsselautoren**<br>{tags}", unsafe_allow_html=True)
 
-                # ── Schritt 4: Hypothesen-Validierung (on demand) ────────────
-                val_cache = f"validate_{cache_key}"
-                if synth and synth.get("refined_thesis"):
-                    st.markdown("---")
-                    val_col1, val_col2 = st.columns([3, 1])
-                    with val_col1:
-                        st.markdown(
-                            "**🔬 Hypothesen-Check** · Existiert diese Kernhypothese bereits?  "
-                            "Claude sucht gezielt nach Prior Art und bewertet den Neuigkeitsgrad."
-                        )
-                    with val_col2:
-                        run_val = st.button("Prüfen", key=f"runval_{cache_key}",
-                                            use_container_width=True)
-                    if run_val and val_cache not in st.session_state:
-                        with st.spinner("Suche nach Prior Art und bewerte Neuigkeitsgrad…"):
-                            try:
-                                st.session_state[val_cache] = validate_hypothesis(
-                                    synth["refined_thesis"], api_key
-                                )
-                            except Exception as e:
-                                st.session_state[val_cache] = {"error": str(e)}
+                        # ── Schritt 4: Hypothesen-Validierung (on demand) ────
+                        st.markdown("---")
+                        val_cache = f"validate_{cache_key}"
+                        val_col1, val_col2 = st.columns([3, 1])
+                        with val_col1:
+                            st.markdown(
+                                "**🔬 Hypothesen-Check** — Existiert diese Kernhypothese bereits?  \n"
+                                "Claude generiert Prior-Art-Queries, sucht in OpenAlex und bewertet den Neuigkeitsgrad."
+                            )
+                        with val_col2:
+                            run_val = st.button("Prüfen →", key=f"runval_{cache_key}",
+                                                use_container_width=True)
+                        if run_val and val_cache not in st.session_state:
+                            with st.spinner("Suche nach Prior Art und bewerte Neuigkeitsgrad…"):
+                                try:
+                                    st.session_state[val_cache] = validate_hypothesis(
+                                        synth["refined_thesis"], api_key
+                                    )
+                                except Exception as e:
+                                    st.session_state[val_cache] = {"error": str(e)}
 
-                    if val := st.session_state.get(val_cache):
-                        if "error" in val:
-                            st.error(f"Hypothesen-Check fehlgeschlagen: {val['error']}")
-                        else:
-                            novelty = val.get("novelty", "mittel")
-                            n_color = {"hoch": "#d1fae5", "mittel": "#fef3c7", "niedrig": "#fee2e2"}.get(novelty, "#f3f4f6")
-                            n_label = {"hoch": "🟢 Hohes Neuigkeitspotenzial", "mittel": "🟡 Moderates Neuigkeitspotenzial", "niedrig": "🔴 Ähnliche Arbeiten bekannt"}.get(novelty, novelty)
-                            st.markdown(f"""
-                            <div style="background:{n_color};border-radius:8px;padding:12px 16px;margin:8px 0">
-                                <div style="font-weight:700;font-size:0.9em;margin-bottom:6px">{n_label}</div>
-                                <div style="font-size:0.87em;color:#374151">{val.get("assessment","")}</div>
-                                {"<div style='font-size:0.8em;color:#6b7280;margin-top:6px'>Nächste verwandte Arbeit: <em>" + val.get("closest_existing","") + "</em></div>" if val.get("closest_existing") else ""}
-                            </div>""", unsafe_allow_html=True)
-                            if prior := val.get("prior_art_papers"):
-                                with st.expander(f"Prior-Art-Treffer ({len(prior)} Paper)", expanded=False):
-                                    for pi2, pp in enumerate(prior):
-                                        render_paper(pp, render_idx=hash(val_cache + str(pi2)))
+                        if val := st.session_state.get(val_cache):
+                            if "error" in val:
+                                st.error(f"Hypothesen-Check fehlgeschlagen: {val['error']}")
+                            else:
+                                novelty = val.get("novelty", "mittel")
+                                n_color = {"hoch": "#d1fae5", "mittel": "#fef3c7", "niedrig": "#fee2e2"}.get(novelty, "#f3f4f6")
+                                n_label = {"hoch": "🟢 Hohes Neuigkeitspotenzial", "mittel": "🟡 Moderates Neuigkeitspotenzial", "niedrig": "🔴 Ähnliche Arbeiten bekannt"}.get(novelty, novelty)
+                                st.markdown(f"""
+                                <div style="background:{n_color};border-radius:8px;padding:12px 16px;margin:8px 0">
+                                    <div style="font-weight:700;font-size:0.9em;margin-bottom:6px">{n_label}</div>
+                                    <div style="font-size:0.87em;color:#374151">{val.get("assessment","")}</div>
+                                    {"<div style='font-size:0.8em;color:#6b7280;margin-top:6px'>Nächste verwandte Arbeit: <em>" + val.get("closest_existing","") + "</em></div>" if val.get("closest_existing") else ""}
+                                </div>""", unsafe_allow_html=True)
+                                if prior := val.get("prior_art_papers"):
+                                    with st.expander(f"Prior-Art-Treffer ({len(prior)} Paper)", expanded=False):
+                                        for pi2, pp in enumerate(prior):
+                                            render_paper(pp, render_idx=hash(val_cache + str(pi2)))
 
                 # Paper-Liste
                 if lit_papers:
