@@ -582,28 +582,49 @@ def _fetch_semantic_scholar(ss_query: str, year_from: int, year_to: int,
 
 
 _STOPWORDS = frozenset({
+    # Grammatik
     "a", "an", "the", "in", "of", "and", "or", "for", "to", "with", "as",
     "on", "at", "by", "from", "is", "are", "was", "be", "it", "its",
     "this", "that", "which", "who", "how", "what", "between", "among",
+    # Generische Wissenschaftsbegriffe — in fast jedem Paper vorhanden
+    "research", "study", "studies", "analysis", "review", "reviews",
+    "theory", "theories", "theoretical", "framework", "approach", "approaches",
+    "knowledge", "evidence", "data", "results", "findings", "methods",
+    "methodology", "methodological", "systematic", "empirical",
+    "social", "global", "new", "role", "case", "based", "toward", "towards",
+    "using", "through", "across", "within", "beyond", "process", "processes",
+    "perspective", "perspectives", "context", "contexts", "field", "fields",
+    "concept", "concepts", "model", "models", "effect", "effects",
+    "implications", "challenges", "understanding", "development",
 })
 
 def _topic_keywords(queries: list[str]) -> frozenset[str]:
-    """Extrahiert alle bedeutungstragenden Wörter aus den generierten Queries."""
+    """Extrahiert bedeutungstragende Wörter aus generierten Queries (≥4 Zeichen, kein Stopword)."""
     words: set[str] = set()
     for q in queries:
         for w in q.lower().split():
-            if w not in _STOPWORDS and len(w) > 2:
+            if w not in _STOPWORDS and len(w) >= 4:
                 words.add(w)
     return frozenset(words)
 
 def _is_topically_relevant(paper: dict, keywords: frozenset[str]) -> bool:
-    """Prüft ob Titel oder Abstract mindestens ein Query-Keyword enthält.
-    Filtert thematisch völlig fremde Paper heraus (z.B. medizinische Metastudien
-    die nur wegen hoher Zitierungen auftauchen)."""
+    """Zwei-Stufen-Relevanzprüfung:
+    1. Ein spezifisches Keyword im TITEL → sofort akzeptieren (sehr zuverlässig)
+    2. ≥2 Keywords in Titel+Abstract → akzeptieren (breitere Abdeckung)
+    3. Sonst ablehnen — verhindert fachfremde Paper durch generische Wörter."""
     if not keywords:
         return True
-    text = (paper.get("title", "") + " " + paper.get("full", "")).lower()
-    return any(kw in text for kw in keywords)
+    title = paper.get("title", "").lower()
+    abstract = paper.get("full", "").lower()
+    full_text = title + " " + abstract
+
+    # Stufe 1: Titel-Treffer (hohe Präzision)
+    if any(kw in title for kw in keywords):
+        return True
+
+    # Stufe 2: Mindestens 2 verschiedene Keywords in Titel+Abstract
+    matches = sum(1 for kw in keywords if kw in full_text)
+    return matches >= 2
 
 def _is_duplicate(p: dict, seen_titles: set, seen_dois: set) -> bool:
     doi = (p.get("doi") or "").strip()
