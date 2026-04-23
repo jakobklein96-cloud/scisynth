@@ -393,6 +393,7 @@ def _fetch_arxiv(cats: tuple[str, ...], query: str, year_from: int, year_to: int
                 "url":     r.entry_id,
                 "cats":    r.categories[:2],
                 "source":  "arXiv",
+                "doi":     "",
                 "score":   0.0,  # arXiv hat keine Zitationsdaten
             })
     except Exception:
@@ -503,6 +504,7 @@ def _fetch_openalex(oa_query: str, year_from: int, year_to: int,
                 "authors": ", ".join(auths) + suffix if auths else "–",
                 "date":    pub_date[:7],
                 "url":     url,
+                "doi":     doi,
                 "cats":    ["OpenAlex"],
                 "source":  "OpenAlex",
                 "cited":   cited,
@@ -517,13 +519,91 @@ def _fetch_openalex(oa_query: str, year_from: int, year_to: int,
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_semantic_scholar(ss_query: str, year_from: int, year_to: int,
+                             n: int, discipline: str = "") -> list[dict]:
+    """Fetches papers from Semantic Scholar. Better monograph coverage and semantic relevance ranking."""
+    try:
+        if discipline in _HUMANITIES_DISCIPLINES:
+            pool = min(max(n * 4, 25), 100)
+        elif discipline in _STEM_DISCIPLINES:
+            pool = min(n * 2, 50)
+        else:
+            pool = min(max(n * 3, 20), 75)
+
+        resp = requests.get(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            params={
+                "query":  ss_query,
+                "fields": "title,abstract,authors,year,citationCount,externalIds,publicationTypes",
+                "limit":  pool,
+                "year":   f"{year_from}-{year_to}",
+            },
+            headers={"User-Agent": "SciSynth/1.0 (academic research tool)"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        papers: list[dict] = []
+        for w in resp.json().get("data", []):
+            title = (w.get("title") or "").strip()
+            if not title:
+                continue
+            abstract  = w.get("abstract") or ""
+            year      = str(w.get("year") or "2020")
+            cited     = w.get("citationCount") or 0
+            ext_ids   = w.get("externalIds") or {}
+            doi       = ext_ids.get("DOI", "")
+            paper_id  = w.get("paperId", "")
+            url       = f"https://doi.org/{doi}" if doi else f"https://www.semanticscholar.org/paper/{paper_id}"
+            auth_list = [a["name"] for a in (w.get("authors") or [])[:3] if a.get("name")]
+            suffix    = " et al." if len(w.get("authors") or []) > 3 else ""
+            pub_types = w.get("publicationTypes") or []
+            ptype     = ("journal-article" if "JournalArticle" in pub_types
+                         else "book" if "Book" in pub_types else "")
+            score     = _quality_score(cited, year + "-01-01", ptype, discipline)
+            papers.append({
+                "title":        title,
+                "short":        abstract[:420] + "…" if len(abstract) > 420 else abstract,
+                "full":         abstract,
+                "authors":      ", ".join(auth_list) + suffix if auth_list else "–",
+                "date":         year[:4] + "-01",
+                "url":          url,
+                "doi":          doi,
+                "cats":         ["Semantic Scholar"],
+                "source":       "Semantic Scholar",
+                "cited":        cited,
+                "type":         ptype,
+                "score":        score,
+                "has_abstract": bool(abstract),
+            })
+        papers.sort(key=lambda p: p["score"], reverse=True)
+        return papers[:n]
+    except Exception:
+        return []
+
+
+def _is_duplicate(p: dict, seen_titles: set, seen_dois: set) -> bool:
+    doi = (p.get("doi") or "").strip()
+    if doi and doi in seen_dois:
+        return True
+    return p["title"].lower()[:60] in seen_titles
+
+
+def _mark_seen(p: dict, seen_titles: set, seen_dois: set) -> None:
+    doi = (p.get("doi") or "").strip()
+    seen_titles.add(p["title"].lower()[:60])
+    if doi:
+        seen_dois.add(doi)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_to: int,
                  max_per: int, dynamic_queries: tuple[tuple[str, str], ...],
                  peer_review_only: bool) -> dict[str, list[dict]]:
     dq_map = dict(dynamic_queries)  # discipline → optimized query
     result: dict[str, list[dict]] = {}
     half = max(max_per // 2, 2)
-    seen_globally: set[str] = set()  # dedup across all disciplines
+    seen_titles: set[str] = set()  # normalized title prefix
+    seen_dois:   set[str] = set()  # DOI-based dedup (more reliable)
 
     for discipline in disciplines:
         papers: list[dict] = []
@@ -532,8 +612,7 @@ def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_
         cats = ARXIV_CATS.get(discipline)
         if cats:
             for p in _fetch_arxiv(tuple(cats), query, year_from, year_to, half * 2):
-                key = p["title"].lower()[:60]
-                if key not in seen_globally:
+                if not _is_duplicate(p, seen_titles, seen_dois):
                     papers.append(p)
 
         # OpenAlex — dynamische Query (bereits englisch und themenbezogen) oder statischer Fallback
@@ -542,17 +621,31 @@ def fetch_papers(disciplines: tuple[str, ...], query: str, year_from: int, year_
         oa_q = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
         if oa_q:
             oa_papers = _fetch_openalex(oa_q, year_from, year_to, half * 2, peer_review_only, discipline)
-            seen_local = {p["title"].lower()[:60] for p in papers}
+            seen_local_titles: set[str] = {p["title"].lower()[:60] for p in papers}
+            seen_local_dois:   set[str] = {(p.get("doi") or "").strip() for p in papers if p.get("doi")}
             for p in oa_papers:
-                key = p["title"].lower()[:60]
-                if key not in seen_globally and key not in seen_local:
+                if not _is_duplicate(p, seen_titles, seen_dois) and not _is_duplicate(p, seen_local_titles, seen_local_dois):
                     papers.append(p)
-                    seen_local.add(key)
+                    seen_local_titles.add(p["title"].lower()[:60])
+                    doi = (p.get("doi") or "").strip()
+                    if doi:
+                        seen_local_dois.add(doi)
+
+        # Semantic Scholar (semantische Suche, bessere Monografien-Abdeckung)
+        ss_q = dq_map.get(discipline) or OPENALEX_QUERIES.get(discipline, "")
+        if ss_q:
+            ss_papers = _fetch_semantic_scholar(ss_q, year_from, year_to, half * 2, discipline)
+            seen_local_titles2: set[str] = {p["title"].lower()[:60] for p in papers}
+            seen_local_dois2:   set[str] = {(p.get("doi") or "").strip() for p in papers if p.get("doi")}
+            for p in ss_papers:
+                if not _is_duplicate(p, seen_titles, seen_dois) and not _is_duplicate(p, seen_local_titles2, seen_local_dois2):
+                    papers.append(p)
 
         kept = papers[:max_per]
         if kept:
             result[discipline] = kept
-            seen_globally.update(p["title"].lower()[:60] for p in kept)
+            for p in kept:
+                _mark_seen(p, seen_titles, seen_dois)
 
     return result
 
@@ -772,6 +865,29 @@ Antworte NUR mit diesem JSON:
     return json.loads(text)
 
 
+def generate_paper_abstract(paper: dict, api_key: str) -> str:
+    """Generates a brief AI summary for a well-known paper that lacks an indexed abstract.
+    Only suitable for highly-cited works Claude likely knows from training data."""
+    client = anthropic.Anthropic(api_key=api_key)
+    prompt = f"""Erstelle eine wissenschaftliche Kurzzusammenfassung (3–4 Sätze) für folgendes Werk:
+
+Titel: {paper['title']}
+Autor(en): {paper.get('authors', '–')}
+Jahr: {(paper.get('date') or '')[:4]}
+Zitierungen: {paper.get('cited', 0)}
+Quelle: {paper.get('source', '')}
+
+Wichtig: Basiere die Zusammenfassung ausschließlich auf deinem Trainingswissen.
+Falls du das Werk nicht kennst, antworte nur mit: "Werk nicht in Trainingsdaten bekannt."
+Antworte NUR mit der Zusammenfassung, ohne Präambel oder Erklärung."""
+
+    resp = client.messages.create(
+        model=CLAUDE_MODEL, max_tokens=300,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.content[0].text.strip()
+
+
 # ── Dokument-Upload ────────────────────────────────────────────────────────────
 def extract_text(uploaded_file) -> str:
     """Extrahiert Text aus PDF oder TXT. Gibt max. 4000 Zeichen zurück."""
@@ -911,9 +1027,12 @@ def render_header() -> None:
 
 def render_paper(paper: dict, render_idx: int = 0) -> None:
     src   = paper.get("source", "arXiv")
-    s_css = ("background:#f0fdfa;color:#0f766e;border:1px solid #99f6e4"
-             if src == "arXiv" else
-             "background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe")
+    if src == "arXiv":
+        s_css = "background:#f0fdfa;color:#0f766e;border:1px solid #99f6e4"
+    elif src == "Semantic Scholar":
+        s_css = "background:#fdf4ff;color:#7e22ce;border:1px solid #e9d5ff"
+    else:
+        s_css = "background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe"
     cats  = " ".join(f'<span class="tag tag-gray">{c}</span>' for c in paper["cats"])
     fav_id = _item_id("paper", paper["title"])
     st.markdown(f"""
@@ -929,6 +1048,32 @@ def render_paper(paper: dict, render_idx: int = 0) -> None:
         <a href="{paper['url']}" target="_blank" class="paper-link">Paper öffnen →</a>
     </div>
     """, unsafe_allow_html=True)
+    # Abstract generation for papers without abstract
+    if not paper.get("short", "").strip() or not paper.get("full", "").strip():
+        abs_cache_key = f"gen_abs_{fav_id}_{render_idx}"
+        gen_col, _ = st.columns([3, 8])
+        with gen_col:
+            if abs_cache_key in st.session_state:
+                generated = st.session_state[abs_cache_key]
+                st.markdown(f"""
+                <div style="background:#fef9c3;border-radius:6px;padding:8px 12px;
+                            font-size:0.82em;color:#374151;margin:4px 0">
+                    <span style="font-size:0.72em;font-weight:600;text-transform:uppercase;
+                                 color:#92400e;display:block;margin-bottom:4px">
+                        KI-Zusammenfassung (nicht verifiziert)
+                    </span>{generated}
+                </div>""", unsafe_allow_html=True)
+            else:
+                api_key_for_abs = st.session_state.get("current_api_key", "")
+                if api_key_for_abs and st.button("Zusammenfassung generieren", key=f"gen_abs_btn_{fav_id}_{render_idx}"):
+                    with st.spinner("Claude generiert Zusammenfassung…"):
+                        try:
+                            result_abs = generate_paper_abstract(paper, api_key_for_abs)
+                            st.session_state[abs_cache_key] = result_abs
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Fehler: {e}")
+
     col_space, col_fav = st.columns([10, 1])
     with col_fav:
         already = is_favorite(fav_id)
@@ -1244,6 +1389,9 @@ def view_analyse(api_key: str, topic: str, selected: list[str], year_from: int,
         </div>
         """, unsafe_allow_html=True)
         return
+
+    if params:
+        st.session_state["current_api_key"] = params["api_key"]
 
     api_key          = params["api_key"]
     topic            = params["topic"]
