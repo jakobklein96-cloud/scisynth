@@ -635,12 +635,13 @@ def _fetch_openalex_canonical(canonical_query: str, discipline: str = "") -> dic
         common_select = ("id,title,abstract_inverted_index,authorships,"
                          "publication_date,doi,cited_by_count,type,primary_topic")
 
-        # Versuch 1: Titelkeywords per relevance, Autor-Check im Ergebnis
+        # Versuch 1: title.search-Filter nach Titelkeywords, sortiert nach Zitierungen
+        # (titel.search sucht nur im Titelfeld — sehr präzise, kein 400-Fehler wie relevance_score)
         resp = requests.get(
             "https://api.openalex.org/works",
             params={
-                "search":   title_keywords,
-                "sort":     "relevance_score",
+                "filter":   f"title.search:{title_keywords}",
+                "sort":     "cited_by_count:desc",
                 "per_page": 10,
                 "select":   common_select,
                 "mailto":   "scisynth@research.app",
@@ -652,12 +653,12 @@ def _fetch_openalex_canonical(canonical_query: str, discipline: str = "") -> dic
             if _author_matches(w):
                 return _build_paper(w)
 
-        # Versuch 2: Vollquery (Nachname + Titelwörter) per relevance
+        # Versuch 2: Volltext-Suche mit Titelkeywords, sortiert nach Zitierungen
         resp2 = requests.get(
             "https://api.openalex.org/works",
             params={
-                "search":   canonical_query,
-                "sort":     "relevance_score",
+                "search":   title_keywords,
+                "sort":     "cited_by_count:desc",
                 "per_page": 10,
                 "select":   common_select,
                 "mailto":   "scisynth@research.app",
